@@ -227,12 +227,64 @@ pub enum InjectionPoint {
     /// URL-encoded into a query parameter. Produces `?name=<encoded>`.
     /// Default for GET.
     QueryParam(String),
-    /// Raw body. Default for POST.
-    BodyRaw,
+    /// Body injection with optional template and Content-Type.
+    /// `template` is a string with `{{payload}}` as placeholder.
+    /// `None` = raw body (backward compatible).
+    BodyRaw {
+        template: Option<String>,
+        content_type: Option<String>,
+    },
     /// Injects into a header value (for Host, User-Agent, Cookie, etc.).
     Header(String),
     /// Appends to the URL path: `/existing/path/<payload>`.
     PathSegment,
+}
+
+impl InjectionPoint {
+    /// Raw body, no template, no Content-Type.
+    pub fn body_raw() -> Self {
+        InjectionPoint::BodyRaw { template: None, content_type: None }
+    }
+
+    /// Form-encoded body: `key=value&param={{payload}}`.
+    pub fn body_form(template: &str) -> Self {
+        InjectionPoint::BodyRaw {
+            template: Some(template.into()),
+            content_type: Some("application/x-www-form-urlencoded".into()),
+        }
+    }
+
+    /// JSON body: `{"key": "{{payload}}"}`.
+    pub fn body_json(template: &str) -> Self {
+        InjectionPoint::BodyRaw {
+            template: Some(template.into()),
+            content_type: Some("application/json".into()),
+        }
+    }
+
+    /// XML body: `<key>{{payload}}</key>`.
+    pub fn body_xml(template: &str) -> Self {
+        InjectionPoint::BodyRaw {
+            template: Some(template.into()),
+            content_type: Some("application/xml".into()),
+        }
+    }
+
+    /// GraphQL body: `{"query": "{ user(id: \"{{payload}}\") { name } }"}`.
+    pub fn body_graphql(template: &str) -> Self {
+        InjectionPoint::BodyRaw {
+            template: Some(template.into()),
+            content_type: Some("application/json".into()),
+        }
+    }
+
+    /// Custom body with explicit Content-Type.
+    pub fn body_template(content_type: &str, template: &str) -> Self {
+        InjectionPoint::BodyRaw {
+            template: Some(template.into()),
+            content_type: Some(content_type.into()),
+        }
+    }
 }
 
 impl InjectionPoint {
@@ -241,7 +293,6 @@ impl InjectionPoint {
         match self {
             InjectionPoint::QueryParam(name) => {
                 let mut url = Url::parse(base_url).unwrap_or_else(|_| {
-                    // Fallback: treat as bare host:port and build from scratch
                     Url::parse(&format!("http://{}/", base_url)).unwrap()
                 });
                 url.query_pairs_mut().append_pair(name, payload);
@@ -252,12 +303,26 @@ impl InjectionPoint {
                     body: String::new(),
                 }
             }
-            InjectionPoint::BodyRaw => Request {
-                url: base_url.to_string(),
-                method: method.to_string(),
-                headers: HashMap::new(),
-                body: payload.to_string(),
-            },
+            InjectionPoint::BodyRaw { template, content_type } => {
+                let body = match template {
+                    Some(tpl) => tpl.replace("{{payload}}", payload),
+                    None => payload.to_string(),
+                };
+                let headers = match content_type {
+                    Some(ct) => {
+                        let mut h = HashMap::new();
+                        h.insert("Content-Type".into(), ct.clone());
+                        h
+                    }
+                    None => HashMap::new(),
+                };
+                Request {
+                    url: base_url.to_string(),
+                    method: method.to_string(),
+                    headers,
+                    body,
+                }
+            }
             InjectionPoint::Header(name) => {
                 let mut headers = HashMap::new();
                 headers.insert(name.clone(), payload.to_string());
@@ -307,7 +372,7 @@ impl<P: Probe> Fuzzer<P> {
             preset: Preset::default(),
             target_url: String::new(),
             method: "GET".into(),
-            injection: InjectionPoint::QueryParam("q".into()),
+            injection: InjectionPoint::QueryParam("q".into()), // default before target() overrides
             budget: 50,
             replay_seed: None,
             request_timeout: Duration::from_secs(30),
@@ -330,7 +395,7 @@ impl<P: Probe> Fuzzer<P> {
         self.method = method.to_uppercase();
         // Default injection: query param for GET, body for POST
         if self.method == "POST" {
-            self.injection = InjectionPoint::BodyRaw;
+            self.injection = InjectionPoint::body_raw();
         } else {
             self.injection = InjectionPoint::QueryParam("q".into());
         }
@@ -352,15 +417,61 @@ impl<P: Probe> Fuzzer<P> {
         self
     }
 
-    /// Inject payloads as the raw request body.
+    /// Inject payloads as the raw request body (no Content-Type).
     pub fn inject_body_raw(mut self) -> Self {
-        self.injection = InjectionPoint::BodyRaw;
+        self.injection = InjectionPoint::body_raw();
         self
     }
 
     /// Inject payloads as a path segment: `/existing/path/<payload>`.
     pub fn inject_path(mut self) -> Self {
         self.injection = InjectionPoint::PathSegment;
+        self
+    }
+
+    /// Form-encoded POST body. `{{payload}}` is substituted.
+    ///
+    /// Sets `Content-Type: application/x-www-form-urlencoded`.
+    ///
+    /// Example: `.body_form("username=admin&password={{payload}}")`
+    pub fn body_form(mut self, template: &str) -> Self {
+        self.injection = InjectionPoint::body_form(template);
+        self
+    }
+
+    /// JSON POST body. `{{payload}}` is substituted.
+    ///
+    /// Sets `Content-Type: application/json`.
+    ///
+    /// Example: `.body_json(r#"{"search":"{{payload}}"}"#)`
+    pub fn body_json(mut self, template: &str) -> Self {
+        self.injection = InjectionPoint::body_json(template);
+        self
+    }
+
+    /// XML POST body. `{{payload}}` is substituted.
+    ///
+    /// Sets `Content-Type: application/xml`.
+    pub fn body_xml(mut self, template: &str) -> Self {
+        self.injection = InjectionPoint::body_xml(template);
+        self
+    }
+
+    /// GraphQL POST body. `{{payload}}` is substituted.
+    ///
+    /// Sets `Content-Type: application/json`.
+    ///
+    /// Example: `.body_graphql(r#"{"query":"{user(id:\"{{payload}}\"){name}}"}"#)`
+    pub fn body_graphql(mut self, template: &str) -> Self {
+        self.injection = InjectionPoint::body_graphql(template);
+        self
+    }
+
+    /// Custom body with explicit Content-Type. `{{payload}}` is substituted.
+    ///
+    /// Example: `.body_template("text/plain", "prefix-{{payload}}-suffix")`
+    pub fn body_template(mut self, content_type: &str, template: &str) -> Self {
+        self.injection = InjectionPoint::body_template(content_type, template);
         self
     }
 
