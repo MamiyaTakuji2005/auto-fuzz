@@ -15,7 +15,7 @@
 use rand::Rng;
 use crate::signals::signal::{Signal, ReflectionEncoding, ProbeResponse};
 use crate::signals::Request;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::time::Duration;
 
 // ── CorpusEntry ───────────────────────────────────────────────────────────────
@@ -66,12 +66,12 @@ impl CorpusEntry {
 pub struct SeedCorpus {
     entries: Vec<CorpusEntry>,
     total_energy: u32,
-    seen: HashSet<String>,
+    index_by_payload: HashMap<String, usize>,
 }
 
 impl SeedCorpus {
     pub fn new() -> Self {
-        Self { entries: Vec::new(), total_energy: 0, seen: HashSet::new() }
+        Self { entries: Vec::new(), total_energy: 0, index_by_payload: HashMap::new() }
     }
 
     /// Build from a list of seed strings. All get base energy = 1.
@@ -87,10 +87,12 @@ impl SeedCorpus {
 
     pub fn push_seed(&mut self, payload: String) {
         // Deduplicate seeds — same payload only added once.
-        if self.seen.insert(payload.clone()) {
-            self.total_energy += 1;
-            self.entries.push(CorpusEntry::seed(payload));
+        if self.index_by_payload.contains_key(&payload) {
+            return;
         }
+        self.index_by_payload.insert(payload.clone(), self.entries.len());
+        self.total_energy += 1;
+        self.entries.push(CorpusEntry::seed(payload));
     }
 
     /// Add a discovered entry. Returns its index (new or existing).
@@ -98,7 +100,7 @@ impl SeedCorpus {
     ///   - If the new signal is stronger, update the existing entry's energy.
     ///   - Otherwise, skip (no duplicate added).
     pub fn push_discovered(&mut self, entry: CorpusEntry) -> usize {
-        if let Some(idx) = self.entries.iter().position(|e| e.payload == entry.payload) {
+        if let Some(&idx) = self.index_by_payload.get(&entry.payload) {
             // Already in corpus — only upgrade if signal is better.
             let old_energy = self.entries[idx].energy;
             if entry.energy > old_energy {
@@ -109,8 +111,8 @@ impl SeedCorpus {
             }
             idx
         } else {
-            self.seen.insert(entry.payload.clone());
             let idx = self.entries.len();
+            self.index_by_payload.insert(entry.payload.clone(), idx);
             self.total_energy += entry.energy as u32;
             self.entries.push(entry);
             idx
