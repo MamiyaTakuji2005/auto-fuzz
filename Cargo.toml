@@ -1,0 +1,17 @@
+[package]
+name = "auto-fuzz"
+version = "0.1.0"
+edition = "2021"
+authors = ["re:Vise Team"]
+description = "General-purpose evolutionary fuzzer engine — atom-chain generation + havoc mutation, driven by corpus feedback"
+license = "MIT"
+repository = "https://github.com/MamiyaTakuji2005/auto-fuzz"
+
+[dependencies]
+rand = { version = "0.8", features = ["small_rng"] }
+tokio = { version = "1", features = ["time", "rt", "macros"] }
+async-trait = "0.1"
+regex = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
