@@ -4,25 +4,35 @@
 //! or signal classifiers. It just picks a vulnerability class and a target.
 //!
 //! ```ignore
-//! # // Needs a Probe implementation (HTTP client, mock, etc.)
-//! let hits = Fuzzer::new(my_probe)
+//! let result = Fuzzer::new(my_probe)
 //!     .sql_injection()
 //!     .target("https://example.com/search?q=", "GET")
 //!     .budget(100)
 //!     .run()
-//!     .await?;
-//!
-//! for h in &hits.confirmed {
-//!     println!("SQLi: {}", h.payload);
-//! }
+//!     .await
+//!     .unwrap();
+//! // result.confirmed: Vec<Hit> — all confirmed SQLi payloads
 //! ```
 
+use std::sync::Arc;
+use async_trait::async_trait;
+
+use crate::baseline::BaselineProfile;
 use crate::evolutionary::*;
 use crate::payloads;
 use crate::signals::signal::*;
 use crate::signals::{Probe, Request};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
+
+// ── Arc blanket impl for Probe ──────────────────────────────────────────
+
+#[async_trait]
+impl<P: Probe> Probe for Arc<P> {
+    async fn send(&self, req: &Request) -> Result<ProbeResponse, String> {
+        self.as_ref().send(req).await
+    }
+}
 
 // ── Hit (simplified for agent consumption) ──────────────────────────────
 
@@ -31,12 +41,18 @@ use std::time::Duration;
 pub struct Hit {
     /// The payload string that triggered the hit.
     pub payload: String,
-    /// Score from the feedback layer (0–6 for HttpFeedback).
-    pub score: u8,
-    /// True if this is a confirmed vulnerability.
+    /// Raw score from the feedback layer (0–6 for HttpFeedback).
+    pub raw_score: u8,
+    /// Confidence from baseline profiling (0.0 = unreliable, 1.0 = clean).
+    pub confidence: f32,
+    /// Adjusted score = raw_score × confidence.
+    pub adjusted_score: f32,
+    /// True if this is a confirmed vulnerability (and confidence > 0.3).
     pub confirmed: bool,
-    /// Human-readable signal descriptions.
+    /// Signal descriptions that survived baseline filtering.
     pub signals: Vec<String>,
+    /// Signals that were suppressed because the baseline also triggered them.
+    pub suppressed: Vec<String>,
 }
 
 /// Final result returned to the agent.
@@ -50,6 +66,8 @@ pub struct FuzzResult {
     pub probes_sent: usize,
     /// Final corpus size (seeds + discovered).
     pub corpus_size: usize,
+    /// Baseline health summary for audit trail.
+    pub baseline: String,
 }
 
 impl FuzzResult {
@@ -58,7 +76,6 @@ impl FuzzResult {
 
 // ── Vulnerability preset ────────────────────────────────────────────────
 
-/// Bundled configuration for one vulnerability class.
 struct Preset {
     atoms: Vec<String>,
     chain: ChainTable,
@@ -89,15 +106,14 @@ impl Default for Preset {
 
 impl Preset {
     fn sql_injection() -> Self {
-        let mut signal_set = SignalSet::new()
-            .with(Box::new(StatusClassifier))
-            .with(Box::new(ErrorClassifier::dbms_starter()))
-            .with(Box::new(TimeDelayClassifier::default()));
         Self {
             atoms: ATOMS.iter().map(|s| s.to_string()).collect(),
-            chain: ChainTable::defaults(), // SQL chain grammar already seeded
+            chain: ChainTable::defaults(),
             seeds: payloads::SQLI_PAYLOADS.iter().map(|s| s.to_string()).collect(),
-            signal_set,
+            signal_set: SignalSet::new()
+                .with(Box::new(StatusClassifier))
+                .with(Box::new(ErrorClassifier::dbms_starter()))
+                .with(Box::new(TimeDelayClassifier::default())),
             feedback: Box::new(HttpFeedback::default()),
             gen_ratio: 0.3,
             placement: PlacementPolicy::default(),
@@ -107,108 +123,96 @@ impl Preset {
     }
 
     fn xss() -> Self {
-        let mut signal_set = SignalSet::new()
-            .with(Box::new(StatusClassifier))
-            .with(Box::new(ReflectionClassifier))
-            .with(Box::new(BodyDiffClassifier));
         Self {
-            atoms: ATOMS.iter().map(|s| s.to_string()).collect(),
-            chain: ChainTable::defaults(), // XSS chain grammar already seeded
             seeds: payloads::XSS_PAYLOADS.iter().map(|s| s.to_string()).collect(),
-            signal_set,
+            signal_set: SignalSet::new()
+                .with(Box::new(StatusClassifier))
+                .with(Box::new(ReflectionClassifier))
+                .with(Box::new(BodyDiffClassifier)),
             gen_ratio: 0.3,
             ..Default::default()
         }
     }
 
     fn ssti() -> Self {
-        let signal_set = SignalSet::new()
-            .with(Box::new(StatusClassifier))
-            .with(Box::new(SizeClassifier::default()))
-            .with(Box::new(ReflectionClassifier))
-            .with(Box::new(ErrorClassifier::dbms_starter()));
         Self {
             seeds: payloads::SSTI_PAYLOADS.iter().map(|s| s.to_string()).collect(),
-            signal_set,
+            signal_set: SignalSet::new()
+                .with(Box::new(StatusClassifier))
+                .with(Box::new(SizeClassifier::default()))
+                .with(Box::new(ReflectionClassifier))
+                .with(Box::new(ErrorClassifier::dbms_starter())),
             gen_ratio: 0.3,
             ..Default::default()
         }
     }
 
     fn command_injection() -> Self {
-        let signal_set = SignalSet::new()
-            .with(Box::new(StatusClassifier))
-            .with(Box::new(TimeDelayClassifier::default()))
-            .with(Box::new(SizeClassifier::default()));
         Self {
             seeds: payloads::CMD_PAYLOADS.iter().map(|s| s.to_string()).collect(),
-            signal_set,
+            signal_set: SignalSet::new()
+                .with(Box::new(StatusClassifier))
+                .with(Box::new(TimeDelayClassifier::default()))
+                .with(Box::new(SizeClassifier::default())),
             gen_ratio: 0.3,
             ..Default::default()
         }
     }
 
     fn path_traversal() -> Self {
-        let signal_set = SignalSet::new()
-            .with(Box::new(StatusClassifier))
-            .with(Box::new(SizeClassifier::default()))
-            .with(Box::new(ReflectionClassifier));
         Self {
             seeds: payloads::PATH_TRAVERSAL_PAYLOADS.iter().map(|s| s.to_string()).collect(),
-            signal_set,
+            signal_set: SignalSet::new()
+                .with(Box::new(StatusClassifier))
+                .with(Box::new(SizeClassifier::default()))
+                .with(Box::new(ReflectionClassifier)),
             gen_ratio: 0.3,
             ..Default::default()
         }
     }
 
     fn nosql_injection() -> Self {
-        let mut signal_set = SignalSet::new()
-            .with(Box::new(StatusClassifier))
-            .with(Box::new(SizeClassifier::default()))
-            .with(Box::new(ErrorClassifier::dbms_starter()))
-            .with(Box::new(TimeDelayClassifier::default()));
         Self {
             seeds: payloads::NOSQLI_PAYLOADS.iter().map(|s| s.to_string()).collect(),
-            signal_set,
+            signal_set: SignalSet::new()
+                .with(Box::new(StatusClassifier))
+                .with(Box::new(SizeClassifier::default()))
+                .with(Box::new(ErrorClassifier::dbms_starter()))
+                .with(Box::new(TimeDelayClassifier::default())),
             gen_ratio: 0.3,
-            // NoSQL payloads are JSON — use minimal length chains
             length: LengthPolicy::short(),
             ..Default::default()
         }
     }
 
     fn ssrf() -> Self {
-        let signal_set = SignalSet::new()
-            .with(Box::new(StatusClassifier))
-            .with(Box::new(SizeClassifier::default()))
-            .with(Box::new(TimeDelayClassifier::default()));
         Self {
             seeds: payloads::SSRF_PAYLOADS.iter().map(|s| s.to_string()).collect(),
-            signal_set,
-            gen_ratio: 0.0, // pure havoc — SSRF payloads are URLs, grammar adds wrong chars
+            signal_set: SignalSet::new()
+                .with(Box::new(StatusClassifier))
+                .with(Box::new(SizeClassifier::default()))
+                .with(Box::new(TimeDelayClassifier::default())),
+            gen_ratio: 0.0,
             ..Default::default()
         }
     }
 
     fn xxe() -> Self {
-        let signal_set = SignalSet::new()
-            .with(Box::new(StatusClassifier))
-            .with(Box::new(SizeClassifier::default()))
-            .with(Box::new(ReflectionClassifier));
         Self {
             seeds: payloads::XXE_PAYLOADS.iter().map(|s| s.to_string()).collect(),
-            signal_set,
-            gen_ratio: 0.0, // pure havoc — XXE payloads are structured XML
+            signal_set: SignalSet::new()
+                .with(Box::new(StatusClassifier))
+                .with(Box::new(SizeClassifier::default()))
+                .with(Box::new(ReflectionClassifier)),
+            gen_ratio: 0.0,
             ..Default::default()
         }
     }
 
-    /// Pure table sweep — no generation, no havoc. Just fire every seed once.
-    /// Fast, deterministic, maximum precision, zero evolution.
     fn table_sweep() -> Self {
         Self {
-            gen_ratio: 0.0,                         // no generation
-            stop_on_confirmation: false,             // fire all seeds
+            gen_ratio: 0.0,
+            stop_on_confirmation: false,
             ..Default::default()
         }
     }
@@ -217,19 +221,8 @@ impl Preset {
 // ── Fuzzer builder ───────────────────────────────────────────────────────
 
 /// High-level fuzzer interface for AI agents.
-///
-/// ```ignore
-/// let result = Fuzzer::new(my_probe)
-///     .sql_injection()
-///     .target("https://example.com/search?q=", "GET")
-///     .budget(100)
-///     .run()
-///     .await
-///     .unwrap();
-/// // result.confirmed: Vec<Hit> — all confirmed SQLi payloads
-/// ```
 pub struct Fuzzer<P: Probe> {
-    probe: P,
+    probe: Arc<P>,
     preset: Preset,
     target_url: String,
     method: String,
@@ -240,7 +233,7 @@ pub struct Fuzzer<P: Probe> {
 }
 
 impl<P: Probe> Fuzzer<P> {
-    pub fn new(probe: P) -> Self {
+    pub fn new(probe: Arc<P>) -> Self {
         Self {
             probe,
             preset: Preset::default(),
@@ -253,127 +246,55 @@ impl<P: Probe> Fuzzer<P> {
         }
     }
 
-    // ── Vulnerability class presets ──────────────────────────────────
+    pub fn sql_injection(mut self) -> Self { self.preset = Preset::sql_injection(); self }
+    pub fn xss(mut self) -> Self { self.preset = Preset::xss(); self }
+    pub fn ssti(mut self) -> Self { self.preset = Preset::ssti(); self }
+    pub fn command_injection(mut self) -> Self { self.preset = Preset::command_injection(); self }
+    pub fn path_traversal(mut self) -> Self { self.preset = Preset::path_traversal(); self }
+    pub fn nosql_injection(mut self) -> Self { self.preset = Preset::nosql_injection(); self }
+    pub fn ssrf(mut self) -> Self { self.preset = Preset::ssrf(); self }
+    pub fn xxe(mut self) -> Self { self.preset = Preset::xxe(); self }
+    pub fn table_sweep(mut self) -> Self { self.preset = Preset::table_sweep(); self }
 
-    /// SQL injection: error-based, UNION, boolean, time-based.
-    /// 68 table entries + chain-weighted grammar, error + status + time classifiers.
-    pub fn sql_injection(mut self) -> Self {
-        self.preset = Preset::sql_injection();
-        self
-    }
-
-    /// Cross-site scripting: reflected, stored, DOM contexts.
-    /// 26 table entries, reflection + status + body-diff classifiers.
-    pub fn xss(mut self) -> Self {
-        self.preset = Preset::xss();
-        self
-    }
-
-    /// Server-side template injection: Jinja2, Thymeleaf, ERB, FreeMarker.
-    /// 20 table entries, reflection + size + error classifiers.
-    pub fn ssti(mut self) -> Self {
-        self.preset = Preset::ssti();
-        self
-    }
-
-    /// Command injection: pipe, semicolon, backtick, subshell.
-    /// 24 table entries, time-delay + status + size classifiers.
-    pub fn command_injection(mut self) -> Self {
-        self.preset = Preset::command_injection();
-        self
-    }
-
-    /// Path traversal / LFI: dot-dot-slash, encoding variants.
-    /// 16 table entries, status + size + reflection classifiers.
-    pub fn path_traversal(mut self) -> Self {
-        self.preset = Preset::path_traversal();
-        self
-    }
-
-    /// NoSQL injection: MongoDB $gt/$ne/$regex, boolean extract.
-    /// 12 table entries, error + time + status classifiers.
-    pub fn nosql_injection(mut self) -> Self {
-        self.preset = Preset::nosql_injection();
-        self
-    }
-
-    /// Server-side request forgery: cloud metadata, localhost, gopher, dict.
-    /// 9 table entries, status + size + time classifiers. Pure havoc (no grammar).
-    pub fn ssrf(mut self) -> Self {
-        self.preset = Preset::ssrf();
-        self
-    }
-
-    /// XML external entity: file read, OOB.
-    /// 3 table entries, status + size + reflection classifiers. Pure havoc.
-    pub fn xxe(mut self) -> Self {
-        self.preset = Preset::xxe();
-        self
-    }
-
-    /// Pure table sweep — fire each seed once, no evolution.
-    /// Fast and deterministic. Combine with `.seeds(...)` or a vulnerability
-    /// preset above to define the table.
-    pub fn table_sweep(mut self) -> Self {
-        self.preset = Preset::table_sweep();
-        self
-    }
-
-    // ── Configuration ─────────────────────────────────────────────────
-
-    /// Target URL. For GET, payloads are appended as `?q=<payload>`.
-    /// For POST, payloads are sent as the request body.
     pub fn target(mut self, url: &str, method: &str) -> Self {
         self.target_url = url.to_string();
         self.method = method.to_uppercase();
         self
     }
 
-    /// Maximum number of probes to send. Default 50.
-    pub fn budget(mut self, probes: usize) -> Self {
-        self.budget = probes.max(1);
-        self
-    }
+    pub fn budget(mut self, probes: usize) -> Self { self.budget = probes.max(1); self }
 
-    /// Additional seeds beyond the preset table. Use for target-specific
-    /// reconnaissance data (discovered parameter names, auth tokens, etc.).
     pub fn seeds<I, S>(mut self, seeds: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.additional_seeds = seeds.into_iter().map(|s| s.into()).collect();
-        self
-    }
+    where I: IntoIterator<Item = S>, S: Into<String>,
+    { self.additional_seeds = seeds.into_iter().map(|s| s.into()).collect(); self }
 
-    /// Deterministic replay seed. Same seed + same target = same results.
-    pub fn replay_seed(mut self, seed: u64) -> Self {
-        self.replay_seed = Some(seed);
-        self
-    }
-
-    /// Per-request timeout. Default 30 seconds.
-    pub fn request_timeout(mut self, timeout: Duration) -> Self {
-        self.request_timeout = timeout;
-        self
-    }
-
-    /// Override gen_ratio. 0.0 = pure havoc, 1.0 = pure generation.
-    /// The preset chooses a sensible default for each vuln class.
-    pub fn gen_ratio(mut self, ratio: f32) -> Self {
-        self.preset.gen_ratio = ratio.clamp(0.0, 1.0);
-        self
-    }
-
-    /// Stop after the first confirmed hit instead of exhausting the budget.
-    pub fn stop_on_first_hit(mut self) -> Self {
-        self.preset.stop_on_confirmation = true;
-        self
-    }
+    pub fn replay_seed(mut self, seed: u64) -> Self { self.replay_seed = Some(seed); self }
+    pub fn request_timeout(mut self, t: Duration) -> Self { self.request_timeout = t; self }
+    pub fn gen_ratio(mut self, r: f32) -> Self { self.preset.gen_ratio = r.clamp(0.0, 1.0); self }
+    pub fn stop_on_first_hit(mut self) -> Self { self.preset.stop_on_confirmation = true; self }
 
     // ── Run ───────────────────────────────────────────────────────────
 
     pub async fn run(self) -> Result<FuzzResult, String> {
+        let baseline_req = Request {
+            url: self.target_url.clone(),
+            method: self.method.clone(),
+            headers: HashMap::new(),
+            body: String::new(),
+        };
+
+        // ── Pre-flight: profile the baseline ──────────────────────────
+        // Send the empty request. Run it through the same classifiers.
+        // Subtract ambient signals so only payload-specific results survive.
+        let baseline_resp = self.probe.send(&baseline_req).await
+            .map_err(|e| format!("baseline probe failed: {e}"))?;
+        let profile = BaselineProfile::capture(&baseline_resp, &self.preset.signal_set);
+
+        // ── Build the engine ──────────────────────────────────────────
+        // Unwrap the Arc to get P back (refcount is 1 after the pre-flight).
+        let probe = Arc::try_unwrap(self.probe)
+            .unwrap_or_else(|_| panic!("probe still referenced after pre-flight"));
+
         let sampler = WeightedSampler::new(
             self.preset.atoms,
             self.preset.chain,
@@ -387,7 +308,7 @@ impl<P: Probe> Fuzzer<P> {
         }
 
         let mut loop_ = EvolutionaryLoop::new(
-            self.probe,
+            probe,
             corpus,
             sampler,
             havoc,
@@ -398,47 +319,38 @@ impl<P: Probe> Fuzzer<P> {
         .with_signal_set(self.preset.signal_set)
         .with_request_timeout(self.request_timeout);
 
-        if self.preset.stop_on_confirmation {
-            loop_ = loop_.stop_on_first_hit();
-        }
-        if let Some(s) = self.replay_seed {
-            loop_ = loop_.with_seed(s);
-        }
+        if self.preset.stop_on_confirmation { loop_ = loop_.stop_on_first_hit(); }
+        if let Some(s) = self.replay_seed { loop_ = loop_.with_seed(s); }
 
         let method = self.method.clone();
         let url = self.target_url.clone();
         let inject = move |payload: &str| -> Request {
             if method == "POST" {
-                Request {
-                    url: url.clone(),
-                    method: method.clone(),
-                    headers: HashMap::new(),
-                    body: payload.to_string(),
-                }
+                Request { url: url.clone(), method: method.clone(), headers: HashMap::new(), body: payload.to_string() }
             } else {
-                Request {
-                    url: format!("{}?q={}", url, payload),
-                    method: method.clone(),
-                    headers: HashMap::new(),
-                    body: String::new(),
-                }
+                Request { url: format!("{}?q={}", url, payload), method: method.clone(), headers: HashMap::new(), body: String::new() }
             }
         };
 
-        let baseline = Request {
-            url: self.target_url,
-            method: self.method,
-            headers: HashMap::new(),
-            body: String::new(),
-        };
+        let outcome = loop_.run(&baseline_req, inject).await?;
 
-        let outcome = loop_.run(&baseline, inject).await?;
-
-        let to_hit = |h: &EvolutionaryHit| Hit {
-            payload: h.payload.clone(),
-            score: h.score,
-            confirmed: h.confirmed,
-            signals: h.signals.iter().map(|s| s.kind().to_string()).collect(),
+        // ── Post-filter: apply baseline profile to results ────────────
+        let confidence = profile.confidence();
+        let to_hit = |h: &EvolutionaryHit| {
+            let raw: Vec<String> = h.signals.iter().map(|s| s.kind().to_string()).collect();
+            let filtered = profile.filter(&h.signals);
+            let keep: HashSet<String> = filtered.iter().map(|s| s.kind().to_string()).collect();
+            let signals: Vec<String> = filtered.iter().map(|s| s.kind().to_string()).collect();
+            let suppressed: Vec<String> = raw.iter().filter(|k| !keep.contains(*k)).cloned().collect();
+            Hit {
+                payload: h.payload.clone(),
+                raw_score: h.score,
+                confidence,
+                adjusted_score: h.score as f32 * confidence,
+                confirmed: h.confirmed && confidence > 0.3,
+                signals,
+                suppressed,
+            }
         };
 
         Ok(FuzzResult {
@@ -446,6 +358,7 @@ impl<P: Probe> Fuzzer<P> {
             interesting: outcome.interesting.iter().map(to_hit).collect(),
             probes_sent: outcome.probes_sent,
             corpus_size: outcome.final_corpus_size,
+            baseline: profile.summary(),
         })
     }
 }
