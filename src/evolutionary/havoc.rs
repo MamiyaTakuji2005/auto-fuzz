@@ -59,7 +59,95 @@ pub enum HavocOp {
     Uppercase,
 }
 
+/// Per-operator sampling weights. Higher weight = selected more often.
+///
+/// All weights are clamped to ≥ 0.0. Setting a weight to 0.0 disables the
+/// operator entirely. Fields are `pub` so a feedback loop (future MOpt-style
+/// adaptive tuning) can read and update weights between campaigns.
+#[derive(Debug, Clone)]
+pub struct HavocSchedule {
+    pub insert_token: f32,
+    pub replace_token: f32,
+    pub delete_chunk: f32,
+    pub duplicate_chunk: f32,
+    pub splice_suffix: f32,
+    pub url_encode: f32,
+    pub double_url_encode: f32,
+    pub insert_boundary_value: f32,
+    pub repeat_payload: f32,
+    pub wrap_delimiter: f32,
+    pub reverse: f32,
+    pub uppercase: f32,
+}
+
+impl HavocSchedule {
+    /// Sensible defaults for web fuzzing: structural ops weighted higher,
+    /// destructive/narrow ops weighted lower.
+    pub fn defaults() -> Self {
+        Self {
+            insert_token:          3.0,
+            replace_token:         3.0,
+            delete_chunk:          2.0,
+            duplicate_chunk:       1.5,
+            splice_suffix:         2.5,
+            url_encode:            2.5,
+            double_url_encode:     2.0,
+            insert_boundary_value: 1.5,
+            repeat_payload:        0.5,
+            wrap_delimiter:        1.0,
+            reverse:               0.3,
+            uppercase:             0.3,
+        }
+    }
+
+    /// Uniform weights — every operator equally likely. Useful for tests.
+    pub fn uniform() -> Self {
+        Self {
+            insert_token: 1.0, replace_token: 1.0, delete_chunk: 1.0,
+            duplicate_chunk: 1.0, splice_suffix: 1.0, url_encode: 1.0,
+            double_url_encode: 1.0, insert_boundary_value: 1.0,
+            repeat_payload: 1.0, wrap_delimiter: 1.0,
+            reverse: 1.0, uppercase: 1.0,
+        }
+    }
+
+    /// Sample an operator weighted by the schedule.
+    pub fn sample<R: Rng>(&self, rng: &mut R) -> HavocOp {
+        let ops: [(HavocOp, f32); 12] = [
+            (HavocOp::InsertToken,         self.insert_token),
+            (HavocOp::ReplaceWithToken,    self.replace_token),
+            (HavocOp::DeleteChunk,         self.delete_chunk),
+            (HavocOp::DuplicateChunk,      self.duplicate_chunk),
+            (HavocOp::SpliceSuffix,        self.splice_suffix),
+            (HavocOp::UrlEncodeChar,       self.url_encode),
+            (HavocOp::DoubleUrlEncodeChar, self.double_url_encode),
+            (HavocOp::InsertBoundaryValue, self.insert_boundary_value),
+            (HavocOp::RepeatPayload,       self.repeat_payload),
+            (HavocOp::WrapDelimiter,       self.wrap_delimiter),
+            (HavocOp::Reverse,             self.reverse),
+            (HavocOp::Uppercase,           self.uppercase),
+        ];
+        let total: f32 = ops.iter().map(|(_, w)| w).sum();
+        if total <= 0.0 {
+            return HavocOp::InsertToken;
+        }
+        let mut pick = rng.gen::<f32>() * total;
+        for (op, w) in &ops {
+            pick -= w;
+            if pick <= 0.0 {
+                return *op;
+            }
+        }
+        HavocOp::InsertToken // float-drift fallback
+    }
+}
+
+impl Default for HavocSchedule {
+    fn default() -> Self { Self::defaults() }
+}
+
 impl HavocOp {
+    #[allow(dead_code)]
     const ALL: &'static [HavocOp] = &[
         HavocOp::InsertToken,
         HavocOp::ReplaceWithToken,
@@ -75,6 +163,8 @@ impl HavocOp {
         HavocOp::Uppercase,
     ];
 
+    /// Uniform random selection (kept for tests and simple usage).
+    #[allow(dead_code)]
     fn random<R: Rng>(rng: &mut R) -> Self {
         *Self::ALL.choose(rng).expect("ALL is non-empty")
     }
@@ -114,6 +204,8 @@ pub struct HavocMutator {
     /// Remaining steps before `next_payload` returns `None`.
     budget: usize,
     rng: SmallRng,
+    /// Per-operator sampling weights. `pub` so adaptive tuning can read/update.
+    pub schedule: HavocSchedule,
 }
 
 impl HavocMutator {
@@ -124,7 +216,14 @@ impl HavocMutator {
             ops_per_step: 4,
             budget,
             rng: SmallRng::from_entropy(),
+            schedule: HavocSchedule::default(),
         }
+    }
+
+    /// Override the operator schedule (e.g., `HavocSchedule::uniform()` for tests).
+    pub fn with_schedule(mut self, schedule: HavocSchedule) -> Self {
+        self.schedule = schedule;
+        self
     }
 
     /// Override how many operators to chain per step (default: 4).
@@ -285,7 +384,7 @@ impl HavocMutator {
         const MAX_OPS: usize = 32;
         let n = self.ops_per_step;
         let ops: [HavocOp; MAX_OPS] = std::array::from_fn(|i| {
-            if i < n { HavocOp::random(&mut self.rng) } else { HavocOp::InsertToken }
+            if i < n { self.schedule.sample(&mut self.rng) } else { HavocOp::InsertToken }
         });
         let mut result = payload.to_string();
         for i in 0..n {
