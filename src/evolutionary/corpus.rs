@@ -67,11 +67,21 @@ pub struct SeedCorpus {
     entries: Vec<CorpusEntry>,
     total_energy: u32,
     index_by_payload: HashMap<String, usize>,
+    /// Buckets by energy level (1..12). Bucket 0 is unused.
+    buckets: [Vec<usize>; 13],
+    /// Precomputed per-bucket weight = bucket.len() * energy.
+    bucket_weights: [u32; 13],
 }
 
 impl SeedCorpus {
     pub fn new() -> Self {
-        Self { entries: Vec::new(), total_energy: 0, index_by_payload: HashMap::new() }
+        Self {
+            entries: Vec::new(),
+            total_energy: 0,
+            index_by_payload: HashMap::new(),
+            buckets: Default::default(),
+            bucket_weights: [0; 13],
+        }
     }
 
     /// Build from a list of seed strings. All get base energy = 1.
@@ -85,14 +95,40 @@ impl SeedCorpus {
         c
     }
 
+    // ── bucket bookkeeping ──────────────────────────────────────────────────
+
+    fn add_to_bucket(&mut self, idx: usize, energy: u8) {
+        let e = energy as usize;
+        self.buckets[e].push(idx);
+        self.bucket_weights[e] = self.buckets[e].len() as u32 * e as u32;
+    }
+
+    fn remove_from_bucket(&mut self, idx: usize, energy: u8) {
+        let e = energy as usize;
+        let bucket = &mut self.buckets[e];
+        if let Some(pos) = bucket.iter().position(|&i| i == idx) {
+            bucket.swap_remove(pos);
+            self.bucket_weights[e] = bucket.len() as u32 * e as u32;
+        }
+    }
+
+    fn move_bucket(&mut self, idx: usize, old_energy: u8, new_energy: u8) {
+        self.remove_from_bucket(idx, old_energy);
+        self.add_to_bucket(idx, new_energy);
+    }
+
+    // ── public mutation ────────────────────────────────────────────────────
+
     pub fn push_seed(&mut self, payload: String) {
         // Deduplicate seeds — same payload only added once.
         if self.index_by_payload.contains_key(&payload) {
             return;
         }
-        self.index_by_payload.insert(payload.clone(), self.entries.len());
+        let idx = self.entries.len();
+        self.index_by_payload.insert(payload.clone(), idx);
         self.total_energy += 1;
         self.entries.push(CorpusEntry::seed(payload));
+        self.add_to_bucket(idx, 1);
     }
 
     /// Add a discovered entry. Returns its index (new or existing).
@@ -108,27 +144,39 @@ impl SeedCorpus {
                 self.entries[idx].energy = entry.energy;
                 self.entries[idx].best_signal = entry.best_signal;
                 self.total_energy += delta;
+                self.move_bucket(idx, old_energy, entry.energy);
             }
             idx
         } else {
             let idx = self.entries.len();
+            let energy = entry.energy;
             self.index_by_payload.insert(entry.payload.clone(), idx);
-            self.total_energy += entry.energy as u32;
+            self.total_energy += energy as u32;
             self.entries.push(entry);
+            self.add_to_bucket(idx, energy);
             idx
         }
     }
 
     /// Boost the energy of an existing entry (reward a parent whose child found something).
     pub fn boost_energy(&mut self, idx: usize, by: u8) {
-        if let Some(e) = self.entries.get_mut(idx) {
-            let old = e.energy;
-            e.energy = e.energy.saturating_add(by).min(12);
-            self.total_energy += (e.energy - old) as u32;
+        let (old, new) = {
+            if let Some(e) = self.entries.get_mut(idx) {
+                let old = e.energy;
+                e.energy = e.energy.saturating_add(by).min(12);
+                (old, e.energy)
+            } else {
+                return;
+            }
+        };
+        self.total_energy += (new - old) as u32;
+        if new != old {
+            self.move_bucket(idx, old, new);
         }
     }
 
     /// Power schedule: select the next entry to mutate, weighted by energy.
+    /// O(1) via energy buckets — walks 12 buckets instead of the full corpus.
     /// Returns the index; caller uses `entry()` to read the payload.
     pub fn schedule<R: Rng>(&mut self, rng: &mut R) -> Option<usize> {
         if self.entries.is_empty() { return None; }
@@ -137,14 +185,17 @@ impl SeedCorpus {
             return Some(0);
         }
         let mut pick = rng.gen_range(0..self.total_energy);
-        for (i, e) in self.entries.iter_mut().enumerate() {
-            if pick < e.energy as u32 {
-                e.fuzz_count += 1;
-                return Some(i);
+        for energy in 1..=12u8 {
+            let w = self.bucket_weights[energy as usize];
+            if pick < w {
+                let bucket = &self.buckets[energy as usize];
+                let idx = bucket[rng.gen_range(0..bucket.len())];
+                self.entries[idx].fuzz_count += 1;
+                return Some(idx);
             }
-            pick -= e.energy as u32;
+            pick -= w;
         }
-        // Floating-point drift guard: fall back to last entry.
+        // Fallback (should never reach here unless weights are inconsistent).
         let last = self.entries.len() - 1;
         self.entries[last].fuzz_count += 1;
         Some(last)
