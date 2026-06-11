@@ -430,9 +430,17 @@ impl WeightedSampler {
             self.atoms[rng.gen_range(0..self.atoms.len())].as_str()
         };
         if payload.is_empty() { return atom.to_string(); }
-        let boundaries: Vec<usize> = payload.char_indices().map(|(i, _)| i).chain(std::iter::once(payload.len())).collect();
-        let start = boundaries[rng.gen_range(0..boundaries.len())];
-        let end = boundaries[rng.gen_range(boundaries.iter().position(|&b| b == start).unwrap()..boundaries.len())];
+        // ASCII fast path: every byte is a char boundary — no Vec allocation.
+        let (start, end) = if payload.is_ascii() {
+            let s = rng.gen_range(0..=payload.len());
+            (s, rng.gen_range(s..=payload.len()))
+        } else {
+            let boundaries: Vec<usize> = payload.char_indices()
+                .map(|(i, _)| i).chain(std::iter::once(payload.len())).collect();
+            let start_idx = rng.gen_range(0..boundaries.len());
+            let start = boundaries[start_idx];
+            (start, boundaries[rng.gen_range(start_idx..boundaries.len())])
+        };
         format!("{}{}{}", &payload[..start], atom, &payload[end..])
     }
 
@@ -464,6 +472,10 @@ impl WeightedSampler {
 /// Safe for `insert_str`, `split_at`, and `&s[..idx]` on UTF-8 strings.
 pub(crate) fn random_char_boundary<R: Rng>(s: &str, rng: &mut R) -> usize {
     if s.is_empty() { return 0; }
+    // ASCII fast path: every byte is a valid char boundary.
+    if s.is_ascii() {
+        return rng.gen_range(0..=s.len());
+    }
     let count = s.chars().count();
     let nth = rng.gen_range(0..=count);
     if nth == count {

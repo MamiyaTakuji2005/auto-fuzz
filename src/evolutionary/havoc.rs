@@ -163,22 +163,41 @@ impl HavocMutator {
             }
             HavocOp::DeleteChunk => {
                 if payload.len() < 2 { return payload.to_string(); }
-                let boundaries: Vec<usize> = payload.char_indices()
-                    .map(|(i, _)| i).chain(std::iter::once(payload.len())).collect();
-                if boundaries.len() < 2 { return payload.to_string(); }
-                let start_idx = self.rng.gen_range(0..boundaries.len() - 1);
-                let start = boundaries[start_idx];
-                let max_end_idx = (start_idx + boundaries.len().saturating_sub(start_idx) / 2 + 1).min(boundaries.len());
-                let end = boundaries[self.rng.gen_range((start_idx + 1)..max_end_idx)];
+                let (start, end) = if payload.is_ascii() {
+                    let len = payload.len();
+                    let s = self.rng.gen_range(0..len);
+                    let max_end = (s + (len.saturating_sub(s)) / 2 + 1).min(len);
+                    let e = if max_end > s + 1 {
+                        self.rng.gen_range((s + 1)..=max_end)
+                    } else {
+                        s + 1
+                    }.min(len);
+                    (s, e)
+                } else {
+                    let boundaries: Vec<usize> = payload.char_indices()
+                        .map(|(i, _)| i).chain(std::iter::once(payload.len())).collect();
+                    if boundaries.len() < 2 { return payload.to_string(); }
+                    let start_idx = self.rng.gen_range(0..boundaries.len() - 1);
+                    let start = boundaries[start_idx];
+                    let max_end_idx = (start_idx + boundaries.len().saturating_sub(start_idx) / 2 + 1)
+                        .min(boundaries.len());
+                    let end = boundaries[self.rng.gen_range((start_idx + 1)..max_end_idx)];
+                    (start, end)
+                };
                 format!("{}{}", &payload[..start], &payload[end..])
             }
             HavocOp::DuplicateChunk => {
                 if payload.is_empty() { return payload.to_string(); }
-                let boundaries: Vec<usize> = payload.char_indices()
-                    .map(|(i, _)| i).chain(std::iter::once(payload.len())).collect();
-                let start_idx = self.rng.gen_range(0..boundaries.len());
-                let start = boundaries[start_idx];
-                let end = boundaries[self.rng.gen_range(start_idx..boundaries.len())];
+                let (start, end) = if payload.is_ascii() {
+                    let s = self.rng.gen_range(0..=payload.len());
+                    (s, self.rng.gen_range(s..=payload.len()))
+                } else {
+                    let boundaries: Vec<usize> = payload.char_indices()
+                        .map(|(i, _)| i).chain(std::iter::once(payload.len())).collect();
+                    let start_idx = self.rng.gen_range(0..boundaries.len());
+                    let start = boundaries[start_idx];
+                    (start, boundaries[self.rng.gen_range(start_idx..boundaries.len())])
+                };
                 let chunk = payload[start..end].to_string();
                 let ins = random_char_boundary(payload, &mut self.rng);
                 let mut s = payload.to_string();
@@ -198,9 +217,14 @@ impl HavocMutator {
             }
             HavocOp::UrlEncodeChar => {
                 if payload.is_empty() { return payload.to_string(); }
-                let nth = self.rng.gen_range(0..payload.chars().count());
-                let (pos, ch) = payload.char_indices().nth(nth).unwrap();
-                let ch_len = ch.len_utf8();
+                let (pos, ch, ch_len) = if payload.is_ascii() {
+                    let pos = self.rng.gen_range(0..payload.len());
+                    (pos, payload.as_bytes()[pos] as char, 1usize)
+                } else {
+                    let nth = self.rng.gen_range(0..payload.chars().count());
+                    let (pos, ch) = payload.char_indices().nth(nth).unwrap();
+                    (pos, ch, ch.len_utf8())
+                };
                 if ch_len > 1 {
                     // Multi-byte char — percent-encode each UTF-8 byte
                     let bytes = ch.to_string().into_bytes();
@@ -212,9 +236,14 @@ impl HavocMutator {
             }
             HavocOp::DoubleUrlEncodeChar => {
                 if payload.is_empty() { return payload.to_string(); }
-                let nth = self.rng.gen_range(0..payload.chars().count());
-                let (pos, ch) = payload.char_indices().nth(nth).unwrap();
-                let ch_len = ch.len_utf8();
+                let (pos, ch, ch_len) = if payload.is_ascii() {
+                    let pos = self.rng.gen_range(0..payload.len());
+                    (pos, payload.as_bytes()[pos] as char, 1usize)
+                } else {
+                    let nth = self.rng.gen_range(0..payload.chars().count());
+                    let (pos, ch) = payload.char_indices().nth(nth).unwrap();
+                    (pos, ch, ch.len_utf8())
+                };
                 if ch_len > 1 {
                     let bytes = ch.to_string().into_bytes();
                     let encoded: String = bytes.iter().map(|b| format!("%25{:02X}", b)).collect();
