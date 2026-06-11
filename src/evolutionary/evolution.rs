@@ -137,12 +137,18 @@ impl<P: Probe> EvolutionaryLoop<P> {
     }
 
     /// Seed the RNG used by the scheduler, gen-vs-havoc coin flip, and chain
-    /// generation. Same seed + same target behaviour = same probe sequence,
-    /// same corpus, same confirmed hits.
+    /// generation. Automatically derives the havoc RNG seed from this value
+    /// so the full run is reproducible — same seed + same target behaviour =
+    /// same probe sequence, same corpus, same confirmed hits.
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.rng_seed = Some(seed);
+        self.havoc = self.havoc.with_seed(seed.wrapping_add(Self::HAVOC_SEED_OFFSET));
         self
     }
+
+    /// Golden-ratio constant to keep loop and havoc RNG seeds independent
+    /// but deterministic from a single user-provided seed.
+    const HAVOC_SEED_OFFSET: u64 = 0x9E37_79B9_7F4A_7C15;
 
     pub async fn run<F>(mut self, baseline_req: &Request, inject: F)
         -> Result<EvolutionaryOutcome, String>
