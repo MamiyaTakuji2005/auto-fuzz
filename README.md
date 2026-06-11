@@ -1,109 +1,88 @@
 # auto-fuzz
 
-An evolutionary fuzzer engine — feed it a target, a vocabulary, and a budget. It mutates, probes, classifies results, and evolves a corpus of promising payloads toward confirmed hits. Transport-agnostic, fully deterministic, and built for both batch sweeps and long-running campaigns.
+A simple fuzzing engine — feed it a target, a vocabulary, and a budget. It mutates, probes, classifies results, and evolves a corpus of promising payloads toward confirmed hits, all from a tiny initial table. Tries to be transport-agnostic, fully deterministic, and built for both batch sweeps and long runs.
 
-## Features
+## What it does
 
-**Dual-engine generation** — blends grammar-based chain generation (52 web-attack atoms with weighted transitions) and 12 stochastic havoc operators, controlled by a single `gen_ratio` knob. Generation builds novel payloads from scratch; havoc mutates existing ones. Blend them or go pure.
+Generates candidate payloads by blending two strategies: chain-based grammar generation (atoms drawn from a weighted vocabulary) and stochastic havoc mutation (random operators applied to existing payloads). A single `gen_ratio` knob controls the mix — 0.0 is pure havoc, 1.0 is pure generation, 0.3 balances both.
 
-**Power-scheduled corpus** — entries carry energy (1–12). A bucket-based O(1) scheduler picks parents proportional to energy, so high-signal payloads receive more mutations. Corpus deduplication with payload-to-index map keeps lookup O(1) and upgrades energy when a stronger signal is rediscovered.
+Probes are sent through a `Probe` trait (HTTP, TCP, mock — anything that implements `async fn send`). Results are classified by a composable set of signal detectors (status, size, reflection, timing, error patterns, body diff). A baseline profile captured from a clean request filters out ambient noise before feedback evaluation decides what's interesting.
 
-**Six signal classifiers** — Status, Size, BodyDiff, Reflection (literal / percent-encoded / HTML-encoded), TimeDelay, and Error (DBMS regex patterns). Composable via `SignalSet` — pick only what you need for your target.
+Interesting payloads join a living corpus. Entries carry energy scores (1–12); a power schedule picks parents proportional to energy, so payloads that triggered strong signals get mutated more often. The corpus never shrinks, but duplicates are rejected (energy is upgraded if the same payload is rediscovered with a stronger signal).
 
-**Baseline-aware filtering** — a `BaselineProfile` captures ambient signals from a clean request. Before evaluating feedback, the loop strips anything the baseline already exhibits. Variant-specific matching (not just `kind()` labels) keeps filtering precise.
+The loop stops when the probe budget is spent, a confirmed hit is found (if `stop_on_confirmation` is set), or the corpus runs dry.
 
-**Context-aware feedback** — `Feedback::evaluate(&EvaluationContext)` receives the full probe picture: payload, request, baseline response, probe response, raw signals, filtered signals, timing, and transport errors. Single-pass evaluation with no repeated iteration.
+## Why these choices
 
-**Candidate-level dedup** — fast u64 fingerprint (`DefaultHasher`) prevents duplicate probes. Combined with no-op mutation retry (resample up to 3× if the candidate equals the seed).
+**Chain-weighted grammar** — instead of a fixed mutation table, atoms carry transition weights. `'` → ` OR ` is 5× more likely than `'` → `&`. This steers generation toward known-useful sequences without hardcoding paths. Unlisted pairs default to uniform, so the engine still explores.
 
-**Weighted operator schedule** — `HavocSchedule` with 12 per-operator weights (all `pub` for future adaptive tuning). Defaults bias toward structural ops (insert/replace/splice at 3.0) and away from destructive ones (reverse/uppercase at 0.3). Swap in `HavocSchedule::uniform()` for classic behavior.
+**Generation + havoc blend** — pure grammar is predictable; pure havoc is chaotic. Blending them keeps the corpus diverse (generation finds novel shapes) while still exploiting promising leads (havoc mutates from high-energy parents).
 
-**Global payload cap** — `PayloadPolicy { max_len, reject_oversized }` gates candidates before transport. Prevents memory pressure, server-side rejection, and accidental self-DoS from unbounded growth.
+**Baseline-aware signals** — a clean probe often triggers false signals (status codes, error pages, WAF fingerprints). Profiling the baseline once and filtering ambient signals per-variant (not just per-kind) keeps the corpus from filling with noise.
 
-**Diagnostic counters** — `EvolutionaryOutcome` reports `probe_errors`, `timeouts`, `duplicate_candidates_skipped`, `oversized_candidates_skipped`, and `mutation_noops`. See at a glance whether a run was effective or wasted.
+**Corpus power schedule** — LibAFL-style energy-weighted scheduling. Not every interesting payload is equally interesting — the ones that triggered errors or time delays deserve more CPU. Energy decays naturally as fuzz_count rises (each mutation child slightly dilutes the parent's draw probability).
 
-**Deterministic replay** — seed the RNG once; the engine auto-derives a separate seed for havoc via golden-ratio offset. Same seed + same target behavior = same probe sequence, same corpus, same hits. Dual-mode RNG: `SmallRng` for throughput, `ChaCha12Rng` for cross-platform bit-identical replay.
+**Determinism** — one seed produces the same probe sequence every time. The loop and havoc RNGs are derived from a single seed via a golden-ratio offset so they stay independent but reproducible. Switch to `ChaCha12Rng` for bit-identical replay across Rust versions and platforms.
 
-**Agent facade** — `Fuzzer` builder with 8 vulnerability presets (SQLi, XSS, SSTI, CMD injection, path traversal, NoSQLi, SSRF, XXE) and 8 `InjectionPoint` strategies (query param, form body, JSON body, XML, GraphQL, headers, path segments, raw body templates). One-liner: `Fuzzer::sql_injection().target(url, "GET").inject_query("q").run().await`.
+**Transport agnosticism** — the engine doesn't know what HTTP is. A `Probe` trait with a single `send` method abstracts the wire. Mock probes in tests, real HTTP in production, TCP for binary protocols — same loop.
 
-**Transport-agnostic** — the `Probe` trait abstracts the wire. Ships with mock probes for testing; plug in HTTP, TCP, or anything else.
+## Performance notes
 
-## Strengths
+Per-iteration CPU cost is kept small so the network round-trip dominates:
 
-**Hot-path performance** — per-iteration cost dominated by the network probe, not the engine:
+- Power schedule: O(1) 12-bucket weighted draw (not O(n) linear scan)
+- Corpus dedup: O(1) `HashMap<String, usize>` lookup
+- Atom sampling: precomputed cumulative transition tables (no per-sample allocation)
+- Operator selection: stack-allocated array, no heap allocation per mutate call
+- Splice sync: incremental push on corpus growth (no full clone)
+- Char-boundary ops: ASCII fast path (direct byte indexing instead of char counting)
+- Candidate dedup: `DefaultHasher` fingerprint → `HashSet<u64>`
 
-| Operation | Approach |
-|-----------|----------|
-| Power schedule | O(1) 12-bucket weighted draw |
-| Corpus dedup | O(1) `HashMap<String, usize>` |
-| Atom sampling | Precomputed cumulative transition tables, zero allocations |
-| Havoc operator selection | Stack-allocated `[HavocOp; 32]` array |
-| Corpus splice sync | Incremental `push_corpus_payload()` — one string per growth |
-| Char-boundary ops | ASCII fast path — direct byte indexing, no `char_indices` scans |
-| Candidate dedup | `DefaultHasher::finish()` → `HashSet<u64>` |
-| No-op detection | Post-hoc `candidate != seed` comparison |
-
-**Binary size** — ~1 MB (release, LTO, stripped). `rand_chacha` adds negligible overhead.
-
-**Zero unsafe** — entire crate compiles clean without unsafe blocks.
-
-**73 tests** — deterministic replay, single-atom invariance, Unicode safety, operator coverage, classifier precision, baseline filtering, corpus power schedule, and ASCII/Unicode fast-path validation.
+Release binary is ~1 MB (LTO, stripped). No unsafe code.
 
 ## Architecture
 
 ```
-atoms → sampler → mutator → loop (with signals + feedback) → transport
+atoms → sampler → mutator → loop (signals + feedback) → transport
 ```
 
 ### Atoms (`evolutionary/atoms.rs`)
-- **ATOMS** — 52 web-attack atoms (`'`, `"`, `<`, `{{`, `}}`, ` OR `, ` UNION `, `..`, etc.)
-- **NUMERIC_ATOMS** — 18 boundary values (`0`, `-1`, `NaN`, `Infinity`, `2147483647`, etc.)
-- **ChainTable** — sparse `(from, to) → f32` weight map. 0.0 = never, 1.0 = default, 20.0 = near-deterministic. Pre-seeded with SQL/XSS/template/command/path chains.
-- **PlacementPolicy** — append, prepend, or wrap with configurable weights.
-- **LengthPolicy** — geometric stop probability. `short()`, `medium()`, `long()`, or `fixed(N)`.
-- **WeightedSampler** — wires atoms + chain table + placement + length. Precomputed cumulative transition tables for zero-allocation sampling. Presets: `default_weights()`, `uniform()`, `numeric()`, `from_proto_config()`.
+- 52 web-attack atoms (`'`, `"`, `<`, `{{`, `}}`, ` OR `, ` UNION `, `..`, etc.) plus 18 numeric boundary values
+- `ChainTable` — sparse `(from, to) → f32` weight map. 0.0 = never, 1.0 = default, 20.0 = near-deterministic. Pre-seeded SQL/XSS/template/command chains
+- `PlacementPolicy` — append, prepend, or wrap with weighted probabilities
+- `LengthPolicy` — geometric stop probability. `short()`, `medium()`, `long()`, `fixed(n)`
 
 ### Signals (`signals/`)
-- Composable `SignalSet` with 6 classifiers. Each returns zero or more signals per probe.
-- **BaselineProfile** — captures ambient signals from a clean request and filters them out before feedback evaluation. Variant-specific matching (status class+direction, error family+snippet, magnitude thresholds).
-- `Probe` trait — `async fn send(&self, req: &Request) -> Result<ProbeResponse, String>`.
+- Six classifiers: Status, Size, BodyDiff, Reflection (literal / percent-encoded / HTML-encoded), TimeDelay, Error (DBMS regex library)
+- `BaselineProfile` — captures and filters ambient signals. Variant-specific matching (status class + direction, error family + snippet, magnitude)
+- `Probe` trait — `async fn send(&self, req: &Request) -> Result<ProbeResponse, String>`
 
 ### Havoc (`evolutionary/havoc.rs`)
-- **12 operators** — InsertToken, ReplaceWithToken, DeleteChunk, DuplicateChunk, SpliceSuffix, UrlEncodeChar, DoubleUrlEncodeChar, InsertBoundaryValue, RepeatPayload, WrapDelimiter, Reverse, Uppercase.
-- **HavocSchedule** — per-operator weight table, `pub` fields for adaptive tuning. `sample()` is a single `gen::<f32>()` + 12-entry linear scan.
-- UTF-8 safe: all string slicing uses `random_char_boundary()`. ASCII fast path skips char counting.
+- 12 operators: InsertToken, ReplaceWithToken, DeleteChunk, DuplicateChunk, SpliceSuffix, UrlEncodeChar, DoubleUrlEncodeChar, InsertBoundaryValue, RepeatPayload, WrapDelimiter, Reverse, Uppercase
+- `HavocSchedule` — per-operator weight table with `pub` fields. Defaults bias toward structural ops (insert/replace/splice ~3.0) over destructive ones (reverse/uppercase ~0.3)
+- All string slicing is UTF-8 safe via `random_char_boundary()`. ASCII payloads take a fast path
 
 ### Corpus & Feedback (`evolutionary/corpus.rs`)
-- **SeedCorpus** — entries are never removed (AFL-style). Energy-weighted power schedule. Deduplication with energy upgrade on rediscovery.
-- **Feedback** trait — `evaluate(&EvaluationContext) -> FeedbackEval`. Full context: payload, request, baseline, response, raw & filtered signals.
-- **HttpFeedback** — signal-strength implementation. Scores 0–6; confirmed thresholds for Error, TimeDelay, Reflected(Literal), and StatusDelta(≥500).
+- `SeedCorpus` — entries never removed. Bucket-based power schedule. Payload-to-index dedup
+- `Feedback` trait — `evaluate(&EvaluationContext) -> FeedbackEval`. Receives payload, request, baseline, response, raw & filtered signals, timing
+- `HttpFeedback` — default implementation. Scores signals 0–6. Confirmed on Error, TimeDelay, Reflected(Literal), StatusDelta(≥500)
 
 ### Loop (`evolutionary/evolution.rs`)
-- **EvolutionaryLoop\<P: Probe\>** — `gen_ratio` blends generation and havoc. `max_probes` caps the budget. `stop_on_confirmation` for surgical probes. `PayloadPolicy` gates length. Candidate dedup and no-op retry.
-- **EvolutionaryOutcome** — `hits`, `interesting`, `probes_sent`, `final_corpus_size`, `baseline_profile`, and 5 diagnostic counters.
+- `EvolutionaryLoop<P: Probe>` — blends generation and havoc via `gen_ratio`. Configurable probe budget, timeout, dedup, payload length cap, no-op retry, and RNG backend
+- `EvolutionaryOutcome` — hits, interesting entries, probes sent, corpus size, baseline profile, plus diagnostic counters (errors, timeouts, duplicates/oversized skipped, no-op mutations)
 
-### Transport
-- `Request` — url, method, headers, body.
-- `ProbeResponse` — status, body, duration.
-- Implement `Probe` for any protocol.
-
-## Quick Start
+## Quick start
 
 ```rust
 use auto_fuzz::evolutionary::*;
 use auto_fuzz::signals::*;
 
-// 1. Define transport
-struct HttpProbe;
-impl Probe for HttpProbe { /* ... */ }
-
-// 2. Build the loop
 let sampler = WeightedSampler::default_weights();
 let havoc   = HavocMutator::new(sampler.clone(), 200);
 let corpus  = SeedCorpus::from_seeds(["'", "\"", "<"]);
 let fb      = Box::new(HttpFeedback::default());
 
-let outcome = EvolutionaryLoop::new(HttpProbe, corpus, sampler, havoc, fb)
+let outcome = EvolutionaryLoop::new(my_probe, corpus, sampler, havoc, fb)
     .with_gen_ratio(0.3)
     .with_max_probes(100)
     .with_seed(42)
@@ -113,11 +92,9 @@ let outcome = EvolutionaryLoop::new(HttpProbe, corpus, sampler, havoc, fb)
         headers: HashMap::new(),
         body: String::new(),
     }).await?;
-
-println!("hits: {}, probes: {}", outcome.hits.len(), outcome.probes_sent);
 ```
 
-Or use the agent facade:
+Or use the agent facade for common vulnerability classes:
 
 ```rust
 use auto_fuzz::agent::Fuzzer;
@@ -125,21 +102,16 @@ use auto_fuzz::agent::Fuzzer;
 let result = Fuzzer::sql_injection()
     .target("http://target.com", "GET")
     .inject_query("q")
-    .with_seed(42)
     .run()
     .await?;
-
-for hit in &result.hits {
-    println!("confirmed: {} (score {})", hit.payload, hit.score);
-}
 ```
 
-## Payload Tables (`payloads.rs`)
+## Payload tables (`payloads.rs`)
 
-Classic high-probability probes. Use as seed corpus:
+Pre-built probe sets for common vulnerability classes. Use as seed corpus:
 
-| Table | Entries | Coverage |
-|-------|---------|----------|
+| Table | Entries | Covers |
+|-------|---------|--------|
 | `SQLI_PAYLOADS` | 68 | error, boolean, UNION, time, stacked |
 | `XSS_PAYLOADS` | 26 | script, img, svg, iframe, attribute |
 | `SSTI_PAYLOADS` | 20 | Jinja2, Thymeleaf, ERB, FreeMarker |
@@ -149,7 +121,7 @@ Classic high-probability probes. Use as seed corpus:
 | `NOSQLI_PAYLOADS` | 12 | $gt, $ne, $regex, $where |
 | `SSRF_PAYLOADS` | 9 | metadata, localhost, gopher, dict |
 
-## Cheat Sheet
+## Cheat sheet
 
 | Goal | How |
 |------|-----|
@@ -160,28 +132,21 @@ Classic high-probability probes. Use as seed corpus:
 | Freeze corpus | `HttpFeedback { min_corpus_score: 255 }` |
 | Single shot | `.with_max_probes(1).stop_on_first_hit()` |
 | No signals | `SignalSet::new()` |
-| Fixed-length chains | `LengthPolicy::fixed(N)` |
+| Fixed-length chains | `LengthPolicy::fixed(n)` |
 | Append-only | `PlacementPolicy::append_only()` |
-| Uniform atoms | `WeightedSampler::uniform()` |
+| Uniform atom choice | `WeightedSampler::uniform()` |
 | One atom only | `atoms = ["X"]` |
-| Custom feedback | `impl Feedback` trait |
+| Custom scoring | `impl Feedback` trait |
 | Custom transport | `impl Probe` trait |
-| Sweep payload table | `SeedCorpus::from_seeds(payloads::SQLI_PAYLOADS)` |
-| Enable candidate dedup | `.with_dedup(true)` (default) |
-| Cap payload length | `.with_payload_policy(PayloadPolicy::default())` (4096 bytes) |
+| Sweep a payload table | `SeedCorpus::from_seeds(payloads::SQLI_PAYLOADS)` |
+| Cap payload length | `.with_payload_policy(PayloadPolicy::default())` |
+| Disable candidate dedup | `.with_dedup(false)` |
 
 ## Running
 
 ```bash
-# Demo
-cargo run --example digits
-
-# Benchmark
-cargo run --example benchmark --release
-
-# GUI workbench
-cargo run --bin fuzz-gui --features gui --release
-
-# Tests
-cargo test
+cargo run --example digits              # demo
+cargo run --example benchmark --release # speed test
+cargo run --bin fuzz-gui --features gui --release  # desktop workbench
+cargo test                              # 73 tests
 ```
