@@ -175,6 +175,27 @@ impl Default for SeedCorpus {
 
 // ── Feedback ──────────────────────────────────────────────────────────────────
 
+/// Result of evaluating a set of probe signals.
+/// Produced by a single pass through the signal list — no repeated iteration.
+#[derive(Debug, Clone)]
+pub struct FeedbackEval {
+    /// Energy to assign (0 = discard, 1–12 = keep with this weight).
+    pub score: u8,
+    /// Should this payload be added to the corpus?
+    pub interesting: bool,
+    /// High-value confirmation: stop the loop early and report.
+    pub confirmed: bool,
+    /// The strongest signal in the set (for corpus entry tracking).
+    pub best_signal: Signal,
+}
+
+impl FeedbackEval {
+    /// Empty eval — no signals, no effect.
+    pub fn none() -> Self {
+        Self { score: 0, interesting: false, confirmed: false, best_signal: Signal::NoEffect }
+    }
+}
+
 /// Decides if a probe result is interesting enough to add to the corpus, and
 /// how much energy to assign. This is the LibAFL `Feedback` concept.
 ///
@@ -182,14 +203,9 @@ impl Default for SeedCorpus {
 /// agent feedback ("the AI said this is interesting"), coverage feedback
 /// (structural response diff), or compose multiple feedbacks.
 pub trait Feedback: Send + Sync {
-    /// Should this payload be added to the corpus?
-    fn is_interesting(&self, signals: &[Signal]) -> bool;
-
-    /// Energy to assign (0 = discard, 1–12 = keep with this weight).
-    fn score(&self, signals: &[Signal]) -> u8;
-
-    /// High-value confirmation: stop the loop early and report.
-    fn is_confirmed(&self, signals: &[Signal]) -> bool;
+    /// Evaluate the signals in a single pass. Returns all decisions at once
+    /// to avoid repeated iteration over the signal list.
+    fn evaluate(&self, signals: &[Signal]) -> FeedbackEval;
 }
 
 /// Signal-strength feedback. Uses the same ranking as the existing
@@ -205,36 +221,36 @@ impl Default for HttpFeedback {
 }
 
 impl Feedback for HttpFeedback {
-    fn is_interesting(&self, signals: &[Signal]) -> bool {
-        self.score(signals) >= self.min_corpus_score
-    }
+    fn evaluate(&self, signals: &[Signal]) -> FeedbackEval {
+        let mut best = Signal::NoEffect;
+        let mut best_rank: u8 = 0;
+        let mut confirmed = false;
 
-    fn score(&self, signals: &[Signal]) -> u8 {
-        signals.iter().map(score_one).max().unwrap_or(0)
-    }
+        for s in signals {
+            let rank = match s {
+                Signal::Error { .. } => { confirmed = true; 6 }
+                Signal::TimeDelay { .. } => { confirmed = true; 5 }
+                Signal::Reflected { encoding } => {
+                    if matches!(encoding, ReflectionEncoding::Literal) { confirmed = true; }
+                    4
+                }
+                Signal::StatusDelta { to, .. } => {
+                    if *to >= 500 { confirmed = true; 4 } else { 3 }
+                }
+                Signal::SizeDelta { ratio, .. } => {
+                    if *ratio >= 3.0 || *ratio <= 0.33 { 3 } else { 2 }
+                }
+                Signal::BodyDiff => 2,
+                Signal::NoEffect => 0,
+            };
+            if rank > best_rank {
+                best_rank = rank;
+                best = s.clone();
+            }
+        }
 
-    fn is_confirmed(&self, signals: &[Signal]) -> bool {
-        signals.iter().any(|s| match s {
-            Signal::Error { .. }                         => true,
-            Signal::TimeDelay { .. }                     => true,
-            Signal::Reflected { encoding }               => matches!(encoding, ReflectionEncoding::Literal),
-            Signal::StatusDelta { to, .. }               => *to >= 500,
-            _                                            => false,
-        })
-    }
-}
-
-fn score_one(s: &Signal) -> u8 {
-    match s {
-        Signal::Error { .. }                                   => 6,
-        Signal::TimeDelay { .. }                               => 5,
-        Signal::Reflected { .. }                               => 4,
-        Signal::StatusDelta { to, .. } if *to >= 500           => 4,
-        Signal::StatusDelta { .. }                             => 3,
-        Signal::SizeDelta { ratio, .. } if *ratio >= 3.0 || *ratio <= 0.33 => 3,
-        Signal::SizeDelta { .. }                               => 2,
-        Signal::BodyDiff                                       => 2,
-        Signal::NoEffect                                       => 0,
+        let interesting = best_rank >= self.min_corpus_score;
+        FeedbackEval { score: best_rank, interesting, confirmed, best_signal: best }
     }
 }
 
@@ -273,13 +289,15 @@ mod tests {
     fn http_feedback_scores_correctly() {
         let fb = HttpFeedback::default();
         let error_signals = vec![Signal::Error { family: "mysql".into(), snippet: "syntax".into() }];
-        assert_eq!(fb.score(&error_signals), 6);
-        assert!(fb.is_interesting(&error_signals));
-        assert!(fb.is_confirmed(&error_signals));
+        let eval = fb.evaluate(&error_signals);
+        assert_eq!(eval.score, 6);
+        assert!(eval.interesting);
+        assert!(eval.confirmed);
 
         let no_effect = vec![Signal::NoEffect];
-        assert_eq!(fb.score(&no_effect), 0);
-        assert!(!fb.is_interesting(&no_effect));
+        let eval = fb.evaluate(&no_effect);
+        assert_eq!(eval.score, 0);
+        assert!(!eval.interesting);
     }
 
     #[test]

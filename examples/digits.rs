@@ -55,18 +55,19 @@ impl Probe for MockServer {
 
 struct SimpleFeedback;
 impl Feedback for SimpleFeedback {
-    fn is_interesting(&self, signals: &[Signal]) -> bool {
-        signals.iter().any(|s| matches!(s, Signal::Error { .. } | Signal::StatusDelta { .. }))
-    }
-    fn score(&self, signals: &[Signal]) -> u8 {
-        signals.iter().map(|s| match s {
-            Signal::Error { .. } => 6,
-            Signal::StatusDelta { .. } => 4,
-            _ => 0,
-        }).max().unwrap_or(0)
-    }
-    fn is_confirmed(&self, signals: &[Signal]) -> bool {
-        signals.iter().any(|s| matches!(s, Signal::Error { .. }))
+    fn evaluate(&self, signals: &[Signal]) -> FeedbackEval {
+        let mut best = Signal::NoEffect;
+        let mut best_rank: u8 = 0;
+        let mut confirmed = false;
+        for s in signals {
+            let rank = match s {
+                Signal::Error { .. } => { confirmed = true; 6 }
+                Signal::StatusDelta { .. } => 4,
+                _ => 0,
+            };
+            if rank > best_rank { best_rank = rank; best = s.clone(); }
+        }
+        FeedbackEval { score: best_rank, interesting: best_rank >= 2, confirmed, best_signal: best }
     }
 }
 
@@ -161,17 +162,15 @@ async fn main() {
         let resp = simulate(payload);
         let signals = SignalSet::defaults().run(payload, &simulate(""), &resp);
         let fb = SimpleFeedback;
-        let score = fb.score(&signals);
-        let interesting = fb.is_interesting(&signals);
-        let confirmed = fb.is_confirmed(&signals);
-        let icon = if confirmed { "✓" } else if interesting { "●" } else { "·" };
+        let eval = fb.evaluate(&signals);
+        let icon = if eval.confirmed { "✓" } else if eval.interesting { "●" } else { "·" };
         let sigs: Vec<String> = signals.iter().map(|s| s.kind().to_string()).collect();
         println!(
             "  {icon}  #{:<2}  payload={:<10}  status={}  score={}  {sigs:?}",
             i + 1,
             format!("{:?}", payload),
             resp.status,
-            score,
+            eval.score,
         );
     }
     println!();

@@ -24,7 +24,7 @@ pub use atoms::{
     tail_atom, tail_atom_from,
 };
 pub use havoc::{HavocMutator, HavocOp};
-pub use corpus::{CorpusEntry, SeedCorpus, Feedback, HttpFeedback};
+pub use corpus::{CorpusEntry, SeedCorpus, Feedback, HttpFeedback, FeedbackEval};
 pub use evolution::{EvolutionaryLoop, EvolutionaryOutcome, EvolutionaryHit};
 
 // Re-export signal/mutator primitives so callers only need one import path.

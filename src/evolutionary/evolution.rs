@@ -227,13 +227,11 @@ impl<P: Probe> EvolutionaryLoop<P> {
             // Classify — then filter through baseline profile.
             let raw_signals = self.signal_set.run(&candidate, &baseline, &resp);
             let signals = baseline_profile.filter(&raw_signals);
-            let score   = self.feedback.score(&signals);
-            let is_conf = self.feedback.is_confirmed(&signals);
+            let eval = self.feedback.evaluate(&signals);
 
             // Corpus evolution — only filtered signals affect decisions.
-            if self.feedback.is_interesting(&signals) {
-                let best = best_signal_from(&signals);
-                let entry = CorpusEntry::discovered(candidate.clone(), best, score, parent_idx);
+            if eval.interesting {
+                let entry = CorpusEntry::discovered(candidate.clone(), eval.best_signal, eval.score, parent_idx);
                 self.corpus.push_discovered(entry);
                 self.corpus.boost_energy(parent_idx, 1);
 
@@ -249,16 +247,16 @@ impl<P: Probe> EvolutionaryLoop<P> {
                     payload: candidate,
                     signals,
                     ambient,
-                    score,
+                    score: eval.score,
                     parent_idx,
-                    confirmed: is_conf,
+                    confirmed: eval.confirmed,
                 };
-                if is_conf {
+                if eval.confirmed {
                     hits.push(hit.clone());
                 }
                 interesting.push(hit);
 
-                if is_conf && self.stop_on_confirmation {
+                if eval.confirmed && self.stop_on_confirmation {
                     break;
                 }
             }
@@ -272,26 +270,6 @@ impl<P: Probe> EvolutionaryLoop<P> {
             baseline_profile,
         })
     }
-}
-
-fn best_signal_from(signals: &[Signal]) -> Signal {
-    fn rank(s: &Signal) -> u8 {
-        match s {
-            Signal::Error { .. }       => 6,
-            Signal::TimeDelay { .. }   => 5,
-            Signal::Reflected { .. }   => 4,
-            Signal::StatusDelta { to, .. } if *to >= 500 => 4,
-            Signal::StatusDelta { .. } => 3,
-            Signal::SizeDelta { ratio, .. } if *ratio >= 3.0 || *ratio <= 0.33 => 3,
-            Signal::SizeDelta { .. }   => 2,
-            Signal::BodyDiff           => 2,
-            Signal::NoEffect           => 0,
-        }
-    }
-    signals.iter()
-        .max_by_key(|s| rank(s))
-        .cloned()
-        .unwrap_or(Signal::NoEffect)
 }
 
 #[cfg(test)]
