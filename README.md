@@ -382,6 +382,44 @@ CHEAT SHEET
 "Empty corpus (no probes)"    →  SeedCorpus::from_seeds([])
 "Custom feedback"             →  impl Feedback trait
 "Custom transport"            →  impl Probe trait, pass to EvolutionaryLoop::new()
+"Sweep SQLi payload table"    →  SeedCorpus::from_seeds(payloads::SQLI_PAYLOADS)
 
 Run the demo:  cargo run --example digits
 Launch the GUI: cargo run --bin fuzz-gui --features gui --release
+
+
+═══════════════════════════════════════════════════════════════
+PAYLOAD TABLES (src/payloads.rs)
+═══════════════════════════════════════════════════════════════
+
+Classic high-probability probes for common vulnerability classes.
+Use as seed corpus to start from known-good payloads — the engine
+mutates from there instead of from scratch.
+
+  payloads::SQLI_PAYLOADS        — 68 entries  (error, boolean, UNION, time, stacked)
+  payloads::XSS_PAYLOADS         — 26 entries  (script, img, svg, iframe, attribute)
+  payloads::SSTI_PAYLOADS        — 20 entries  (Jinja2, Thymeleaf, ERB, FreeMarker)
+  payloads::CMD_PAYLOADS         — 24 entries  (pipe, semicolon, backtick, subshell)
+  payloads::PATH_TRAVERSAL_PAYLOADS — 16 entries (dot-dot-slash, encoding variants)
+  payloads::XXE_PAYLOADS         —  3 entries  (external entity, OOB)
+  payloads::NOSQLI_PAYLOADS      — 12 entries  ($gt, $ne, $regex, $where)
+  payloads::SSRF_PAYLOADS        —  9 entries  (metadata, localhost, gopher, dict)
+
+Usage:
+
+  let seeds = payloads::SQLI_PAYLOADS;
+  let corpus = SeedCorpus::from_seeds(seeds);  // 68 seeds, energy=1 each
+
+  // Optional: also mix in atoms vocabulary seeds for exploration
+  corpus.push_seed("'".into());
+  corpus.push_seed("\"".into());
+
+  let loop_ = EvolutionaryLoop::new(probe, corpus, sampler, havoc, feedback)
+      .with_gen_ratio(0.3)  // 70% havoc mutates existing table entries
+      .with_max_probes(200); // 200 probes covers most of the table +
+                              // neighborhood exploration
+
+The engine starts by scheduling table entries (all equal energy).
+Havoc mutates them — splice, delete, insert, URL-encode. The ones
+that trigger signals get energy boosts and produce more children.
+Over time the corpus evolves beyond the table into novel payloads.
