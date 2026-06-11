@@ -140,10 +140,16 @@ impl HavocMutator {
         self
     }
 
-    /// Provide the corpus payload list for splice operations.
-    /// Call this whenever the corpus grows.
+    /// Provide the corpus payload list for splice operations. Replaces all payloads.
+    /// Prefer `push_corpus_payload` for incremental updates after the initial sync.
     pub fn update_corpus(&mut self, payloads: Vec<String>) {
         self.corpus_payloads = payloads;
+    }
+
+    /// Push a single new payload for splice operations — O(1) instead of
+    /// cloning the entire corpus on every growth.
+    pub fn push_corpus_payload(&mut self, payload: String) {
+        self.corpus_payloads.push(payload);
     }
 
     /// Apply a single operator to `payload`. Pure: does not consume budget.

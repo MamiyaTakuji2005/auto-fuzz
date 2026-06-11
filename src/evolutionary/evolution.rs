@@ -190,7 +190,6 @@ impl<P: Probe> EvolutionaryLoop<P> {
         let mut hits: Vec<EvolutionaryHit>        = Vec::new();
         let mut interesting: Vec<EvolutionaryHit> = Vec::new();
         let mut probes_sent = 0usize;
-        let mut last_corpus_size = self.corpus.len();
 
         // Initial sync — seed the splice corpus once before the loop.
         self.havoc.update_corpus(self.corpus.all_payloads());
@@ -199,13 +198,6 @@ impl<P: Probe> EvolutionaryLoop<P> {
             // Power schedule: pick corpus entry weighted by energy.
             let Some(parent_idx) = self.corpus.schedule(&mut rng) else { break };
             let seed_payload = self.corpus.entry(parent_idx).unwrap().payload.clone();
-
-            // Only re-sync the splice corpus when something new was added.
-            let current_size = self.corpus.len();
-            if current_size != last_corpus_size {
-                self.havoc.update_corpus(self.corpus.all_payloads());
-                last_corpus_size = current_size;
-            }
 
             // Generation vs mutation decision.
             let candidate = if rng.gen::<f32>() < self.gen_ratio {
@@ -244,7 +236,12 @@ impl<P: Probe> EvolutionaryLoop<P> {
             // Corpus evolution — only filtered signals affect decisions.
             if eval.interesting {
                 let entry = CorpusEntry::discovered(candidate.clone(), eval.best_signal, eval.score, parent_idx);
+                let prev_len = self.corpus.len();
                 self.corpus.push_discovered(entry);
+                // Incrementally feed the splice corpus — no full clone.
+                if self.corpus.len() > prev_len {
+                    self.havoc.push_corpus_payload(candidate.clone());
+                }
                 self.corpus.boost_energy(parent_idx, 1);
 
                 // Compute ambient signals — what the baseline explained away.
