@@ -75,11 +75,20 @@ pub fn tail_atom(s: &str) -> Option<&'static str> {
 
 /// Sparse weight map `(from_atom, to_atom) → f32` using owned strings.
 ///
-/// Stored as nested HashMap for O(1) lookup without allocation on the hot path.
-/// Missing pairs default to 1.0. Weights are clamped to ≥ 0.0.
+/// Stored as nested HashMap for construction. Missing pairs default to 1.0.
+/// Weights are clamped to ≥ 0.0. For the hot sampling path, `compile()`
+/// precomputes cumulative transition tables — zero allocations per sample.
 #[derive(Debug, Clone)]
 pub struct ChainTable {
     weights: HashMap<String, HashMap<String, f32>>,
+}
+
+/// Precomputed transition table for a single source atom.
+#[derive(Debug, Clone)]
+struct CompiledTransitions {
+    /// Monotonically increasing cumulative weights: `(target_idx, cum_weight)`.
+    cumulative: Vec<(usize, f32)>,
+    total: f32,
 }
 
 impl ChainTable {
@@ -101,6 +110,25 @@ impl ChainTable {
             .and_then(|inner| inner.get(to))
             .copied()
             .unwrap_or(1.0)
+    }
+
+    /// Precompute cumulative transition tables for all source atoms.
+    /// After this, sampling is a single O(atoms) linear scan with zero allocations.
+    fn compile(&self, atoms: &[String]) -> Vec<CompiledTransitions> {
+        atoms.iter().map(|from| {
+            let explicit = self.weights.get(from.as_str());
+            let mut cumulative = Vec::with_capacity(atoms.len());
+            let mut running = 0.0f32;
+            for (j, to) in atoms.iter().enumerate() {
+                let w = explicit
+                    .and_then(|inner| inner.get(to.as_str()))
+                    .copied()
+                    .unwrap_or(1.0);
+                running += w;
+                cumulative.push((j, running));
+            }
+            CompiledTransitions { cumulative, total: running }
+        }).collect()
     }
 
     /// Pre-seeded weights using meaningful bands (5.0 = strong, 20.0 = near-deterministic).
@@ -257,6 +285,10 @@ pub struct WeightedSampler {
     pub chain_table: ChainTable,
     pub placement: PlacementPolicy,
     pub length: LengthPolicy,
+    /// Precomputed transition tables — zero-allocation sampling on the hot path.
+    transitions: Vec<CompiledTransitions>,
+    /// Atom string → index for O(1) tail-hint lookups.
+    atom_ids: HashMap<String, usize>,
 }
 
 impl WeightedSampler {
@@ -266,7 +298,12 @@ impl WeightedSampler {
         placement: PlacementPolicy,
         length: LengthPolicy,
     ) -> Self {
-        Self { atoms, chain_table, placement, length }
+        let transitions = chain_table.compile(&atoms);
+        let atom_ids: HashMap<String, usize> = atoms.iter()
+            .enumerate()
+            .map(|(i, a)| (a.clone(), i))
+            .collect();
+        Self { atoms, chain_table, placement, length, transitions, atom_ids }
     }
 
     /// Default web-attack sampler (ATOMS table, seeded weights, balanced placement, medium length).
@@ -331,48 +368,53 @@ impl WeightedSampler {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    /// Find the longest atom suffix in `s` from an owned atom slice.
-    fn tail_hint<'a>(s: &str, atoms: &'a [String]) -> Option<&'a str> {
-        atoms.iter()
-            .map(|a| a.as_str())
-            .filter(|a| s.ends_with(*a))
-            .max_by_key(|a| a.len())
+    /// Find the longest atom suffix in `s`, returning its index and string.
+    fn tail_hint_idx(&self, s: &str) -> Option<(usize, &str)> {
+        self.atoms.iter()
+            .enumerate()
+            .filter(|(_, a)| s.ends_with(a.as_str()))
+            .max_by_key(|(_, a)| a.len())
+            .map(|(i, a)| (i, a.as_str()))
+    }
+
+    /// Sample the next atom given a source atom index. Uses precomputed
+    /// cumulative transition table — zero allocations, no HashMap lookups.
+    fn sample_next_idx<R: Rng>(&self, from_idx: usize, rng: &mut R) -> (usize, &str) {
+        let trans = &self.transitions[from_idx];
+        if trans.total <= 0.0 {
+            let i = rng.gen_range(0..self.atoms.len());
+            return (i, self.atoms[i].as_str());
+        }
+        let pick = rng.gen::<f32>() * trans.total;
+        for &(idx, cum_w) in &trans.cumulative {
+            if pick <= cum_w {
+                return (idx, self.atoms[idx].as_str());
+            }
+        }
+        let last = self.atoms.len() - 1;
+        (last, self.atoms[last].as_str())
     }
 
     // ── Mutation mode (used by HavocMutator) ─────────────────────────────────
 
-    fn sample_next_from<'a, R: Rng>(
-        &self,
-        hint: Option<&str>,
-        atoms: &'a [String],
-        rng: &mut R,
-    ) -> &'a str {
-        if let Some(from) = hint {
-            let weights: Vec<f32> = atoms.iter()
-                .map(|to| self.chain_table.weight(from, to.as_str()))
-                .collect();
-            let total: f32 = weights.iter().sum();
-            if total > 0.0 {
-                let mut pick = rng.gen::<f32>() * total;
-                for (i, &w) in weights.iter().enumerate() {
-                    pick -= w;
-                    if pick <= 0.0 { return atoms[i].as_str(); }
-                }
-                return atoms[atoms.len() - 1].as_str();
+    /// Sample the next atom from `self.atoms` given the current chain tail hint.
+    /// If no hint, picks uniformly. Uses compiled transitions when hint is present.
+    pub fn sample_next<'a, R: Rng>(&'a self, hint: Option<&str>, rng: &mut R) -> &'a str {
+        if let Some(h) = hint {
+            if let Some(from_idx) = self.atom_ids.get(h) {
+                return self.sample_next_idx(*from_idx, rng).1;
             }
         }
-        atoms[rng.gen_range(0..atoms.len())].as_str()
-    }
-
-    /// Sample the next atom from `self.atoms` given the current chain tail hint.
-    pub fn sample_next<'a, R: Rng>(&'a self, hint: Option<&str>, rng: &mut R) -> &'a str {
-        self.sample_next_from(hint, &self.atoms, rng)
+        self.atoms[rng.gen_range(0..self.atoms.len())].as_str()
     }
 
     /// Insert a chain-weighted atom at a random char boundary in `payload`.
     pub fn insert<R: Rng>(&self, payload: &str, rng: &mut R) -> String {
-        let hint = Self::tail_hint(payload, &self.atoms);
-        let atom = self.sample_next(hint.as_deref(), rng);
+        let atom = if let Some((from_idx, _)) = self.tail_hint_idx(payload) {
+            self.sample_next_idx(from_idx, rng).1
+        } else {
+            self.atoms[rng.gen_range(0..self.atoms.len())].as_str()
+        };
         if payload.is_empty() { return atom.to_string(); }
         let pos = random_char_boundary(payload, rng);
         let mut s = payload.to_string();
@@ -382,8 +424,11 @@ impl WeightedSampler {
 
     /// Replace a random slice of `payload` (at char boundaries) with an atom.
     pub fn replace_slice<R: Rng>(&self, payload: &str, rng: &mut R) -> String {
-        let hint = Self::tail_hint(payload, &self.atoms);
-        let atom = self.sample_next(hint.as_deref(), rng);
+        let atom = if let Some((from_idx, _)) = self.tail_hint_idx(payload) {
+            self.sample_next_idx(from_idx, rng).1
+        } else {
+            self.atoms[rng.gen_range(0..self.atoms.len())].as_str()
+        };
         if payload.is_empty() { return atom.to_string(); }
         let boundaries: Vec<usize> = payload.char_indices().map(|(i, _)| i).chain(std::iter::once(payload.len())).collect();
         let start = boundaries[rng.gen_range(0..boundaries.len())];
@@ -396,16 +441,16 @@ impl WeightedSampler {
     /// Build an atom chain and apply it to `base` using the placement policy.
     ///
     /// Chain length is drawn from `self.length`. Each atom is selected from
-    /// `self.atoms` weighted by `self.chain_table` from the previous atom tail.
+    /// `self.atoms` weighted by the precomputed transition tables.
     pub fn apply_chain<R: Rng>(&self, base: &str, rng: &mut R) -> String {
         let n = self.length.sample_count(rng);
-        let mut hint_str: Option<String> = Self::tail_hint(base, &self.atoms)
-            .map(|s| s.to_string());
+        let mut from_idx: Option<usize> = self.tail_hint_idx(base).map(|(i, _)| i);
         let mut chain = String::new();
         for _ in 0..n {
-            let atom = self.sample_next(hint_str.as_deref(), rng);
+            let from = from_idx.unwrap_or_else(|| rng.gen_range(0..self.atoms.len()));
+            let (_next_idx, atom) = self.sample_next_idx(from, rng);
             chain.push_str(atom);
-            hint_str = Self::tail_hint(&chain, &self.atoms).map(|s| s.to_string());
+            from_idx = self.tail_hint_idx(&chain).map(|(i, _)| i);
         }
         match self.placement.sample(rng) {
             Placement::Append  => format!("{}{}", base, chain),
