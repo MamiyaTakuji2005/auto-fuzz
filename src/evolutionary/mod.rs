@@ -25,7 +25,7 @@ pub use atoms::{
 };
 pub use havoc::{HavocMutator, HavocOp};
 pub use corpus::{CorpusEntry, SeedCorpus, Feedback, HttpFeedback, FeedbackEval, EvaluationContext};
-pub use evolution::{EvolutionaryLoop, EvolutionaryOutcome, EvolutionaryHit};
+pub use evolution::{EvolutionaryLoop, EvolutionaryOutcome, EvolutionaryHit, PayloadPolicy};
 
 // Re-export signal/mutator primitives so callers only need one import path.
 pub use crate::signals::signal::{

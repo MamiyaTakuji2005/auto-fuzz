@@ -31,6 +31,29 @@ use std::collections::hash_map::DefaultHasher;
 use crate::signals::signal::{Signal, SignalSet, ProbeResponse};
 use crate::signals::{Probe, Request};
 
+// ── Payload length policy ─────────────────────────────────────────────────────
+
+/// Global cap on candidate payload length.
+///
+/// Unbounded growth from repeated insertions, wrap mode, repeat, splice, and
+/// long chain generation can waste memory, slow probes, trigger server-side
+/// rejection, or accidentally self-DoS. This policy gates candidates before
+/// they hit the transport layer.
+#[derive(Debug, Clone)]
+pub struct PayloadPolicy {
+    /// Maximum allowed payload length in bytes.
+    pub max_len: usize,
+    /// When `true`, oversized candidates are discarded (the loop skips to the
+    /// next iteration). When `false`, they are probed anyway.
+    pub reject_oversized: bool,
+}
+
+impl Default for PayloadPolicy {
+    fn default() -> Self {
+        Self { max_len: 4096, reject_oversized: true }
+    }
+}
+
 // ── Result types ──────────────────────────────────────────────────────────────
 
 /// A single confirmed or interesting hit from the evolutionary loop.
@@ -85,6 +108,8 @@ pub struct EvolutionaryLoop<P> {
     /// When true, skip probing a candidate that was already sent this run.
     /// Prevents wasted probes on duplicate payloads. Default true.
     pub dedup_candidates: bool,
+    /// Global cap on candidate payload length.
+    pub payload_policy: PayloadPolicy,
     /// Deterministic RNG seed. `None` (default) samples from entropy.
     /// Setting a seed makes the corpus evolution and probe order reproducible.
     pub rng_seed: Option<u64>,
@@ -112,6 +137,7 @@ impl<P: Probe> EvolutionaryLoop<P> {
             // early-exit via `stop_on_first_hit()`.
             stop_on_confirmation: false,
             dedup_candidates: true,
+            payload_policy: PayloadPolicy::default(),
             rng_seed: None,
         }
     }
@@ -155,6 +181,13 @@ impl<P: Probe> EvolutionaryLoop<P> {
     /// Disable for deterministic tests with single-atom generators.
     pub fn with_dedup(mut self, enabled: bool) -> Self {
         self.dedup_candidates = enabled;
+        self
+    }
+
+    /// Set the maximum allowed payload length. Candidates exceeding this are
+    /// skipped (if `reject_oversized` is true on the policy).
+    pub fn with_payload_policy(mut self, policy: PayloadPolicy) -> Self {
+        self.payload_policy = policy;
         self
     }
 
@@ -230,6 +263,11 @@ impl<P: Probe> EvolutionaryLoop<P> {
                 if !tried.insert(hasher.finish()) {
                     continue;
                 }
+            }
+
+            // Length gate: discard oversized candidates before they hit transport.
+            if self.payload_policy.reject_oversized && candidate.len() > self.payload_policy.max_len {
+                continue;
             }
 
             // Probe.
