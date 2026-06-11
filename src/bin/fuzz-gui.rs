@@ -11,6 +11,7 @@ use rand::SeedableRng;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use url::Url;
 
 // ── HTTP Probe ─────────────────────────────────────────────────────────────
 
@@ -159,8 +160,12 @@ fn launch(
                                 body: payload.to_string(),
                             }
                         } else {
+                            let mut url = Url::parse(&tgt).unwrap_or_else(|_| {
+                                Url::parse(&format!("http://{}/", tgt)).unwrap()
+                            });
+                            url.query_pairs_mut().append_pair("q", payload);
                             Request {
-                                url: format!("{}?q={}", tgt, payload),
+                                url: url.to_string(),
                                 method: meth.clone(),
                                 headers: std::collections::HashMap::new(),
                                 body: String::new(),

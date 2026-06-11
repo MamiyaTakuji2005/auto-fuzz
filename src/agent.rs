@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 use async_trait::async_trait;
+use url::Url;
 
 use crate::baseline::BaselineProfile;
 use crate::evolutionary::*;
@@ -218,6 +219,72 @@ impl Preset {
     }
 }
 
+// ── Injection point ────────────────────────────────────────────────────
+
+/// Where the payload is injected into the request.
+#[derive(Debug, Clone)]
+pub enum InjectionPoint {
+    /// URL-encoded into a query parameter. Produces `?name=<encoded>`.
+    /// Default for GET.
+    QueryParam(String),
+    /// Raw body. Default for POST.
+    BodyRaw,
+    /// Injects into a header value (for Host, User-Agent, Cookie, etc.).
+    Header(String),
+    /// Appends to the URL path: `/existing/path/<payload>`.
+    PathSegment,
+}
+
+impl InjectionPoint {
+    /// Apply the injection to a URL+method, producing a full Request.
+    fn apply(&self, base_url: &str, method: &str, payload: &str) -> Request {
+        match self {
+            InjectionPoint::QueryParam(name) => {
+                let mut url = Url::parse(base_url).unwrap_or_else(|_| {
+                    // Fallback: treat as bare host:port and build from scratch
+                    Url::parse(&format!("http://{}/", base_url)).unwrap()
+                });
+                url.query_pairs_mut().append_pair(name, payload);
+                Request {
+                    url: url.to_string(),
+                    method: method.to_string(),
+                    headers: HashMap::new(),
+                    body: String::new(),
+                }
+            }
+            InjectionPoint::BodyRaw => Request {
+                url: base_url.to_string(),
+                method: method.to_string(),
+                headers: HashMap::new(),
+                body: payload.to_string(),
+            },
+            InjectionPoint::Header(name) => {
+                let mut headers = HashMap::new();
+                headers.insert(name.clone(), payload.to_string());
+                Request {
+                    url: base_url.to_string(),
+                    method: method.to_string(),
+                    headers,
+                    body: String::new(),
+                }
+            }
+            InjectionPoint::PathSegment => {
+                let mut url = Url::parse(base_url).unwrap_or_else(|_| {
+                    Url::parse(&format!("http://{}/", base_url)).unwrap()
+                });
+                let path = url.path().trim_end_matches('/').to_string();
+                url.set_path(&format!("{}/{}", path, payload));
+                Request {
+                    url: url.to_string(),
+                    method: method.to_string(),
+                    headers: HashMap::new(),
+                    body: String::new(),
+                }
+            }
+        }
+    }
+}
+
 // ── Fuzzer builder ───────────────────────────────────────────────────────
 
 /// High-level fuzzer interface for AI agents.
@@ -226,6 +293,7 @@ pub struct Fuzzer<P: Probe> {
     preset: Preset,
     target_url: String,
     method: String,
+    injection: InjectionPoint,
     budget: usize,
     replay_seed: Option<u64>,
     request_timeout: Duration,
@@ -239,6 +307,7 @@ impl<P: Probe> Fuzzer<P> {
             preset: Preset::default(),
             target_url: String::new(),
             method: "GET".into(),
+            injection: InjectionPoint::QueryParam("q".into()),
             budget: 50,
             replay_seed: None,
             request_timeout: Duration::from_secs(30),
@@ -259,6 +328,39 @@ impl<P: Probe> Fuzzer<P> {
     pub fn target(mut self, url: &str, method: &str) -> Self {
         self.target_url = url.to_string();
         self.method = method.to_uppercase();
+        // Default injection: query param for GET, body for POST
+        if self.method == "POST" {
+            self.injection = InjectionPoint::BodyRaw;
+        } else {
+            self.injection = InjectionPoint::QueryParam("q".into());
+        }
+        self
+    }
+
+    /// Inject payloads into the named query parameter (URL-encoded).
+    ///
+    /// Produces: `https://target/path?name=<url-encoded payload>`.
+    /// Handles existing query params correctly (appends `&name=...`).
+    pub fn inject_query(mut self, param: &str) -> Self {
+        self.injection = InjectionPoint::QueryParam(param.into());
+        self
+    }
+
+    /// Inject payloads into a header value.
+    pub fn inject_header(mut self, name: &str) -> Self {
+        self.injection = InjectionPoint::Header(name.into());
+        self
+    }
+
+    /// Inject payloads as the raw request body.
+    pub fn inject_body_raw(mut self) -> Self {
+        self.injection = InjectionPoint::BodyRaw;
+        self
+    }
+
+    /// Inject payloads as a path segment: `/existing/path/<payload>`.
+    pub fn inject_path(mut self) -> Self {
+        self.injection = InjectionPoint::PathSegment;
         self
     }
 
@@ -322,14 +424,11 @@ impl<P: Probe> Fuzzer<P> {
         if self.preset.stop_on_confirmation { loop_ = loop_.stop_on_first_hit(); }
         if let Some(s) = self.replay_seed { loop_ = loop_.with_seed(s); }
 
-        let method = self.method.clone();
+        let injection = self.injection.clone();
         let url = self.target_url.clone();
+        let method = self.method.clone();
         let inject = move |payload: &str| -> Request {
-            if method == "POST" {
-                Request { url: url.clone(), method: method.clone(), headers: HashMap::new(), body: payload.to_string() }
-            } else {
-                Request { url: format!("{}?q={}", url, payload), method: method.clone(), headers: HashMap::new(), body: String::new() }
-            }
+            injection.apply(&url, &method, payload)
         };
 
         let outcome = loop_.run(&baseline_req, inject).await?;
