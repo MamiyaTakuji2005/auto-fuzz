@@ -14,6 +14,7 @@
 
 use rand::Rng;
 use crate::signals::signal::{Signal, ReflectionEncoding};
+use std::collections::HashSet;
 
 // ── CorpusEntry ───────────────────────────────────────────────────────────────
 
@@ -58,15 +59,17 @@ impl CorpusEntry {
 
 /// The living corpus. Starts with seeds; grows as the evolutionary loop finds
 /// interesting payloads. Entries are never removed (AFL-style: removals introduce
-/// non-determinism and rarely help).
+/// non-determinism and rarely help). Duplicate payloads are rejected — if a
+/// payload is rediscovered with a stronger signal, its energy is updated.
 pub struct SeedCorpus {
     entries: Vec<CorpusEntry>,
     total_energy: u32,
+    seen: HashSet<String>,
 }
 
 impl SeedCorpus {
     pub fn new() -> Self {
-        Self { entries: Vec::new(), total_energy: 0 }
+        Self { entries: Vec::new(), total_energy: 0, seen: HashSet::new() }
     }
 
     /// Build from a list of seed strings. All get base energy = 1.
@@ -81,16 +84,35 @@ impl SeedCorpus {
     }
 
     pub fn push_seed(&mut self, payload: String) {
-        self.total_energy += 1;
-        self.entries.push(CorpusEntry::seed(payload));
+        // Deduplicate seeds — same payload only added once.
+        if self.seen.insert(payload.clone()) {
+            self.total_energy += 1;
+            self.entries.push(CorpusEntry::seed(payload));
+        }
     }
 
-    /// Add a discovered entry. Returns its new index.
+    /// Add a discovered entry. Returns its index (new or existing).
+    /// If the payload was already seen:
+    ///   - If the new signal is stronger, update the existing entry's energy.
+    ///   - Otherwise, skip (no duplicate added).
     pub fn push_discovered(&mut self, entry: CorpusEntry) -> usize {
-        let idx = self.entries.len();
-        self.total_energy += entry.energy as u32;
-        self.entries.push(entry);
-        idx
+        if let Some(idx) = self.entries.iter().position(|e| e.payload == entry.payload) {
+            // Already in corpus — only upgrade if signal is better.
+            let old_energy = self.entries[idx].energy;
+            if entry.energy > old_energy {
+                let delta = (entry.energy - old_energy) as u32;
+                self.entries[idx].energy = entry.energy;
+                self.entries[idx].best_signal = entry.best_signal;
+                self.total_energy += delta;
+            }
+            idx
+        } else {
+            self.seen.insert(entry.payload.clone());
+            let idx = self.entries.len();
+            self.total_energy += entry.energy as u32;
+            self.entries.push(entry);
+            idx
+        }
     }
 
     /// Boost the energy of an existing entry (reward a parent whose child found something).
@@ -265,5 +287,42 @@ mod tests {
         let mut c = SeedCorpus::new();
         let mut rng = rand::thread_rng();
         assert!(c.schedule(&mut rng).is_none());
+    }
+
+    #[test]
+    fn deduplicates_seeds() {
+        let c = SeedCorpus::from_seeds(["a", "b", "a"]);
+        assert_eq!(c.len(), 2, "duplicate seed should be rejected");
+    }
+
+    #[test]
+    fn deduplicates_discovered() {
+        let mut c = SeedCorpus::from_seeds(["x"]);
+        let e1 = CorpusEntry::discovered("dup".to_string(),
+            Signal::StatusDelta { from: 200, to: 500 }, 4, 0);
+        let idx1 = c.push_discovered(e1);
+        assert_eq!(c.len(), 2);
+
+        // Same payload, lower energy — should be rejected
+        let e2 = CorpusEntry::discovered("dup".to_string(),
+            Signal::StatusDelta { from: 200, to: 302 }, 3, 1);
+        let idx2 = c.push_discovered(e2);
+        assert_eq!(c.len(), 2, "duplicate with lower energy should not add entry");
+        assert_eq!(idx1, idx2, "should return existing index");
+    }
+
+    #[test]
+    fn upgrade_existing_on_stronger_signal() {
+        let mut c = SeedCorpus::from_seeds(["x"]);
+        let e1 = CorpusEntry::discovered("dup".to_string(),
+            Signal::StatusDelta { from: 200, to: 500 }, 4, 0);
+        c.push_discovered(e1);
+
+        // Same payload, HIGHER energy — should upgrade
+        let e2 = CorpusEntry::discovered("dup".to_string(),
+            Signal::Error { family: "sql".into(), snippet: "e".into() }, 6, 1);
+        c.push_discovered(e2);
+        assert_eq!(c.len(), 2, "upgrade should not add duplicate entry");
+        assert_eq!(c.entry(1).unwrap().energy, 6, "energy should be upgraded");
     }
 }
