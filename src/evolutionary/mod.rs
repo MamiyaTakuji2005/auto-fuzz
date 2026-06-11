@@ -15,6 +15,7 @@ pub mod atoms;
 pub mod corpus;
 pub mod evolution;
 pub mod havoc;
+pub mod rng;
 
 pub use atoms::{
     ATOMS, NUMERIC_ATOMS,
@@ -24,6 +25,7 @@ pub use atoms::{
     tail_atom, tail_atom_from,
 };
 pub use havoc::{HavocMutator, HavocOp};
+pub use rng::{RngEngine, RngMode};
 pub use corpus::{CorpusEntry, SeedCorpus, Feedback, HttpFeedback, FeedbackEval, EvaluationContext};
 pub use evolution::{EvolutionaryLoop, EvolutionaryOutcome, EvolutionaryHit, PayloadPolicy};
 

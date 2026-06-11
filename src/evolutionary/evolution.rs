@@ -16,13 +16,12 @@
 //! The corpus, feedback, and power-schedule are reused from `fuzzer_v2::corpus`
 //! (not the v1 mutation::corpus) so the two are independently evolvable.
 
-use rand::rngs::SmallRng;
-use rand::SeedableRng;
 use rand::Rng;
 
 use crate::baseline::BaselineProfile;
 use crate::evolutionary::atoms::WeightedSampler;
 use crate::evolutionary::havoc::HavocMutator;
+use crate::evolutionary::rng::{RngEngine, RngMode};
 use crate::evolutionary::corpus::{SeedCorpus, CorpusEntry, Feedback, EvaluationContext};
 
 use std::collections::HashSet;
@@ -124,6 +123,8 @@ pub struct EvolutionaryLoop<P> {
     /// Deterministic RNG seed. `None` (default) samples from entropy.
     /// Setting a seed makes the corpus evolution and probe order reproducible.
     pub rng_seed: Option<u64>,
+    /// RNG backend (Small for speed, ChaCha12 for cross-platform replay).
+    pub rng_mode: RngMode,
 }
 
 impl<P: Probe> EvolutionaryLoop<P> {
@@ -150,6 +151,7 @@ impl<P: Probe> EvolutionaryLoop<P> {
             dedup_candidates: true,
             payload_policy: PayloadPolicy::default(),
             rng_seed: None,
+            rng_mode: RngMode::Small,
         }
     }
 
@@ -212,6 +214,14 @@ impl<P: Probe> EvolutionaryLoop<P> {
         self
     }
 
+    /// Override the RNG backend. Default is `RngMode::Small`.
+    /// Setting `RngMode::ChaCha12` with a seed gives cross-platform replay.
+    pub fn with_rng_mode(mut self, mode: RngMode) -> Self {
+        self.rng_mode = mode;
+        self.havoc = self.havoc.with_rng_mode(mode);
+        self
+    }
+
     /// Golden-ratio constant to keep loop and havoc RNG seeds independent
     /// but deterministic from a single user-provided seed.
     const HAVOC_SEED_OFFSET: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -244,8 +254,8 @@ impl<P: Probe> EvolutionaryLoop<P> {
         let baseline_profile = BaselineProfile::capture(&baseline, &self.signal_set);
 
         let mut rng = match self.rng_seed {
-            Some(s) => SmallRng::seed_from_u64(s),
-            None    => SmallRng::from_entropy(),
+            Some(s) => RngEngine::from_seed(self.rng_mode, s),
+            None    => RngEngine::from_entropy(self.rng_mode),
         };
         let mut hits: Vec<EvolutionaryHit>        = Vec::new();
         let mut interesting: Vec<EvolutionaryHit> = Vec::new();

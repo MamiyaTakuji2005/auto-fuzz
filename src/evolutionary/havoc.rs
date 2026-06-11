@@ -18,12 +18,11 @@
 //! lives in the chain weights: weight 1.0 = uniform random, higher = steered.
 
 use rand::Rng;
-use rand::SeedableRng;
-use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use crate::signals::signal::Signal;
 use crate::signals::mutator::Mutator;
 use crate::evolutionary::atoms::{WeightedSampler, random_char_boundary};
+use crate::evolutionary::rng::{RngEngine, RngMode};
 
 // ── Operators ─────────────────────────────────────────────────────────────────
 
@@ -203,19 +202,23 @@ pub struct HavocMutator {
     pub ops_per_step: usize,
     /// Remaining steps before `next_payload` returns `None`.
     budget: usize,
-    rng: SmallRng,
+    rng: RngEngine,
+    /// RNG backend (Small for speed, ChaCha12 for replay).
+    pub rng_mode: RngMode,
     /// Per-operator sampling weights. `pub` so adaptive tuning can read/update.
     pub schedule: HavocSchedule,
 }
 
 impl HavocMutator {
     pub fn new(sampler: WeightedSampler, budget: usize) -> Self {
+        let rng_mode = RngMode::Small;
         Self {
             sampler,
             corpus_payloads: Vec::new(),
             ops_per_step: 4,
             budget,
-            rng: SmallRng::from_entropy(),
+            rng: RngEngine::from_entropy(rng_mode),
+            rng_mode,
             schedule: HavocSchedule::default(),
         }
     }
@@ -232,10 +235,18 @@ impl HavocMutator {
         self
     }
 
-    /// Reseed the internal RNG. Pair with `EvolutionaryLoop::with_seed` for
-    /// fully reproducible runs — both RNGs need to be deterministic, not just one.
+    /// Override the RNG backend. Default is `RngMode::Small` for speed.
+    /// Use `RngMode::ChaCha12` for cross-platform reproducible replay.
+    pub fn with_rng_mode(mut self, mode: RngMode) -> Self {
+        self.rng_mode = mode;
+        self.rng = RngEngine::from_entropy(mode);
+        self
+    }
+
+    /// Reseed the internal RNG. Uses the current `rng_mode`.
+    /// Pair with `EvolutionaryLoop::with_seed` for fully reproducible runs.
     pub fn with_seed(mut self, seed: u64) -> Self {
-        self.rng = SmallRng::seed_from_u64(seed);
+        self.rng = RngEngine::from_seed(self.rng_mode, seed);
         self
     }
 
