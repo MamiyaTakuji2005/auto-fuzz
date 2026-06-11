@@ -369,25 +369,25 @@ impl WeightedSampler {
         self.sample_next_from(hint, &self.atoms, rng)
     }
 
-    /// Insert a chain-weighted atom at a random byte offset in `payload`.
+    /// Insert a chain-weighted atom at a random char boundary in `payload`.
     pub fn insert<R: Rng>(&self, payload: &str, rng: &mut R) -> String {
         let hint = Self::tail_hint(payload, &self.atoms);
         let atom = self.sample_next(hint.as_deref(), rng);
         if payload.is_empty() { return atom.to_string(); }
-        let pos = rng.gen_range(0..=payload.len());
+        let pos = random_char_boundary(payload, rng);
         let mut s = payload.to_string();
         s.insert_str(pos, atom);
         s
     }
 
-    /// Replace a random slice of `payload` with a chain-weighted atom.
+    /// Replace a random slice of `payload` (at char boundaries) with an atom.
     pub fn replace_slice<R: Rng>(&self, payload: &str, rng: &mut R) -> String {
         let hint = Self::tail_hint(payload, &self.atoms);
         let atom = self.sample_next(hint.as_deref(), rng);
         if payload.is_empty() { return atom.to_string(); }
-        let len = payload.len();
-        let start = rng.gen_range(0..len);
-        let end   = rng.gen_range(start..=len);
+        let boundaries: Vec<usize> = payload.char_indices().map(|(i, _)| i).chain(std::iter::once(payload.len())).collect();
+        let start = boundaries[rng.gen_range(0..boundaries.len())];
+        let end = boundaries[rng.gen_range(boundaries.iter().position(|&b| b == start).unwrap()..boundaries.len())];
         format!("{}{}{}", &payload[..start], atom, &payload[end..])
     }
 
@@ -412,6 +412,19 @@ impl WeightedSampler {
             Placement::Prepend => format!("{}{}", chain, base),
             Placement::Wrap    => format!("{}{}{}", chain, base, chain),
         }
+    }
+}
+
+/// Pick a random valid char boundary index in `s` (0..=len).
+/// Safe for `insert_str`, `split_at`, and `&s[..idx]` on UTF-8 strings.
+pub(crate) fn random_char_boundary<R: Rng>(s: &str, rng: &mut R) -> usize {
+    if s.is_empty() { return 0; }
+    let count = s.chars().count();
+    let nth = rng.gen_range(0..=count);
+    if nth == count {
+        s.len()
+    } else {
+        s.char_indices().nth(nth).map(|(i, _)| i).unwrap_or(s.len())
     }
 }
 
@@ -649,17 +662,36 @@ mod tests {
     fn insert_and_replace_slice_no_panic_across_seeds() {
         use rand::SeedableRng;
         use rand::rngs::SmallRng;
-        // Exercises the byte-offset arithmetic in insert/replace_slice on
-        // payloads of length 0, 1, and many — any out-of-bounds panic shows here.
+        // Exercises char-boundary arithmetic in insert/replace_slice on
+        // Unicode payloads — any out-of-bounds or mid-codepoint panic shows here.
         let s = WeightedSampler::default_weights();
         for seed in 0..128u64 {
             let mut rng = SmallRng::seed_from_u64(seed);
             let _ = s.insert("", &mut rng);
             let _ = s.insert("x", &mut rng);
             let _ = s.insert("' OR 1=1--", &mut rng);
+            let _ = s.insert("café", &mut rng);
+            let _ = s.insert("日本語", &mut rng);
+            let _ = s.insert("🌟test🌟", &mut rng);
             let _ = s.replace_slice("", &mut rng);
             let _ = s.replace_slice("x", &mut rng);
             let _ = s.replace_slice("' OR 1=1--", &mut rng);
+            let _ = s.replace_slice("café", &mut rng);
+            let _ = s.replace_slice("日本語", &mut rng);
+        }
+    }
+
+    #[test]
+    fn random_char_boundary_always_valid() {
+        use rand::SeedableRng;
+        use rand::rngs::SmallRng;
+        for payload in &["", "x", "café", "日本語", "a🌟b"] {
+            let mut rng = SmallRng::seed_from_u64(1);
+            for _ in 0..100 {
+                let pos = random_char_boundary(payload, &mut rng);
+                assert!(payload.is_char_boundary(pos),
+                    "random_char_boundary returned {}, not a char boundary in {:?}", pos, payload);
+            }
         }
     }
 }

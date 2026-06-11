@@ -23,7 +23,7 @@ use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use crate::signals::signal::Signal;
 use crate::signals::mutator::Mutator;
-use crate::evolutionary::atoms::WeightedSampler;
+use crate::evolutionary::atoms::{WeightedSampler, random_char_boundary};
 
 // ── Operators ─────────────────────────────────────────────────────────────────
 
@@ -157,19 +157,24 @@ impl HavocMutator {
             }
             HavocOp::DeleteChunk => {
                 if payload.len() < 2 { return payload.to_string(); }
-                let len   = payload.len();
-                let start = self.rng.gen_range(0..len);
-                let max_end = (start + len / 2 + 1).min(len);
-                let end   = self.rng.gen_range((start + 1)..=max_end);
+                let boundaries: Vec<usize> = payload.char_indices()
+                    .map(|(i, _)| i).chain(std::iter::once(payload.len())).collect();
+                if boundaries.len() < 2 { return payload.to_string(); }
+                let start_idx = self.rng.gen_range(0..boundaries.len() - 1);
+                let start = boundaries[start_idx];
+                let max_end_idx = (start_idx + boundaries.len().saturating_sub(start_idx) / 2 + 1).min(boundaries.len());
+                let end = boundaries[self.rng.gen_range((start_idx + 1)..max_end_idx)];
                 format!("{}{}", &payload[..start], &payload[end..])
             }
             HavocOp::DuplicateChunk => {
                 if payload.is_empty() { return payload.to_string(); }
-                let len   = payload.len();
-                let start = self.rng.gen_range(0..len);
-                let end   = self.rng.gen_range(start..=len);
+                let boundaries: Vec<usize> = payload.char_indices()
+                    .map(|(i, _)| i).chain(std::iter::once(payload.len())).collect();
+                let start_idx = self.rng.gen_range(0..boundaries.len());
+                let start = boundaries[start_idx];
+                let end = boundaries[self.rng.gen_range(start_idx..boundaries.len())];
                 let chunk = payload[start..end].to_string();
-                let ins   = self.rng.gen_range(0..=len);
+                let ins = random_char_boundary(payload, &mut self.rng);
                 let mut s = payload.to_string();
                 s.insert_str(ins, &chunk);
                 s
@@ -181,26 +186,41 @@ impl HavocMutator {
                 let other = &self.corpus_payloads[
                     self.rng.gen_range(0..self.corpus_payloads.len())];
                 if other.is_empty() { return payload.to_string(); }
-                let my_at  = self.rng.gen_range(0..=payload.len());
-                let its_at = self.rng.gen_range(0..=other.len());
+                let my_at  = random_char_boundary(payload, &mut self.rng);
+                let its_at = random_char_boundary(other, &mut self.rng);
                 format!("{}{}", &payload[..my_at], &other[its_at..])
             }
             HavocOp::UrlEncodeChar => {
                 if payload.is_empty() { return payload.to_string(); }
-                let pos = self.rng.gen_range(0..payload.len());
-                let b   = payload.as_bytes()[pos];
-                format!("{}%{:02X}{}", &payload[..pos], b, &payload[pos + 1..])
+                let nth = self.rng.gen_range(0..payload.chars().count());
+                let (pos, ch) = payload.char_indices().nth(nth).unwrap();
+                let ch_len = ch.len_utf8();
+                if ch_len > 1 {
+                    // Multi-byte char — percent-encode each UTF-8 byte
+                    let bytes = ch.to_string().into_bytes();
+                    let encoded: String = bytes.iter().map(|b| format!("%{:02X}", b)).collect();
+                    format!("{}{}{}", &payload[..pos], encoded, &payload[pos + ch_len..])
+                } else {
+                    format!("{}%{:02X}{}", &payload[..pos], ch as u8, &payload[pos + 1..])
+                }
             }
             HavocOp::DoubleUrlEncodeChar => {
                 if payload.is_empty() { return payload.to_string(); }
-                let pos = self.rng.gen_range(0..payload.len());
-                let b   = payload.as_bytes()[pos];
-                format!("{}%25{:02X}{}", &payload[..pos], b, &payload[pos + 1..])
+                let nth = self.rng.gen_range(0..payload.chars().count());
+                let (pos, ch) = payload.char_indices().nth(nth).unwrap();
+                let ch_len = ch.len_utf8();
+                if ch_len > 1 {
+                    let bytes = ch.to_string().into_bytes();
+                    let encoded: String = bytes.iter().map(|b| format!("%25{:02X}", b)).collect();
+                    format!("{}{}{}", &payload[..pos], encoded, &payload[pos + ch_len..])
+                } else {
+                    format!("{}%25{:02X}{}", &payload[..pos], ch as u8, &payload[pos + 1..])
+                }
             }
             HavocOp::InsertBoundaryValue => {
                 let val = BOUNDARY_VALUES[self.rng.gen_range(0..BOUNDARY_VALUES.len())];
                 if payload.is_empty() { return val.to_string(); }
-                let pos = self.rng.gen_range(0..=payload.len());
+                let pos = random_char_boundary(payload, &mut self.rng);
                 let mut s = payload.to_string();
                 s.insert_str(pos, val);
                 s
@@ -354,5 +374,27 @@ mod tests {
             }
         }
         assert!(grew, "InsertToken should grow the payload");
+    }
+
+    #[test]
+    fn no_panic_on_unicode_payload() {
+        let mut m = HavocMutator::new(WeightedSampler::default_weights(), 100);
+        // 2-byte, 3-byte, 4-byte UTF-8 sequences
+        for payload in &["café", "naïve", "日本語", "🌟star🌟", "a\u{00E9}b\u{3042}c"] {
+            for op in HavocOp::ALL {
+                let _ = m.apply_op(payload, *op);
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_url_encode_preserves_structure() {
+        let mut m = HavocMutator::new(WeightedSampler::default_weights(), 100);
+        // Encoded result should still be valid UTF-8 after any op
+        for _ in 0..20 {
+            let result = m.apply_op("café", HavocOp::UrlEncodeChar);
+            assert!(String::from_utf8(result.into_bytes()).is_ok(),
+                "URL-encoded unicode payload should remain valid UTF-8");
+        }
     }
 }
