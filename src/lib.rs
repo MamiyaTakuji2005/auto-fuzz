@@ -12,6 +12,7 @@
 //!
 //! Extracted from the [re:Vise](https://github.com/MamiyaTakuji2005/re-Vise) project.
 
+pub mod agent;
 pub mod evolutionary;
 pub mod payloads;
 pub mod signals;
