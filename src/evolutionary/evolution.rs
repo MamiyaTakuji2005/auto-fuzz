@@ -20,6 +20,7 @@ use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use rand::Rng;
 
+use crate::baseline::BaselineProfile;
 use crate::evolutionary::atoms::WeightedSampler;
 use crate::evolutionary::havoc::HavocMutator;
 use crate::evolutionary::corpus::{SeedCorpus, CorpusEntry, Feedback};
@@ -32,7 +33,10 @@ use crate::signals::{Probe, Request};
 #[derive(Debug, Clone)]
 pub struct EvolutionaryHit {
     pub payload: String,
+    /// Signals that survived baseline filtering (payload-specific).
     pub signals: Vec<Signal>,
+    /// Signals that were suppressed by baseline profiling (ambient).
+    pub ambient: Vec<Signal>,
     pub score: u8,
     pub parent_idx: usize,
     /// True if this hit triggered `Feedback::is_confirmed`.
@@ -48,6 +52,8 @@ pub struct EvolutionaryOutcome {
     pub interesting: Vec<EvolutionaryHit>,
     pub probes_sent: usize,
     pub final_corpus_size: usize,
+    /// Baseline profile captured during the run (confidence, ambient signals).
+    pub baseline_profile: BaselineProfile,
 }
 
 impl EvolutionaryOutcome {
@@ -163,6 +169,9 @@ impl<P: Probe> EvolutionaryLoop<P> {
             Err(_)     => return Err("baseline timed out".into()),
         };
 
+        // ── Profile the baseline — what ambient signals exist? ────────
+        let baseline_profile = BaselineProfile::capture(&baseline, &self.signal_set);
+
         let mut rng = match self.rng_seed {
             Some(s) => SmallRng::seed_from_u64(s),
             None    => SmallRng::from_entropy(),
@@ -204,21 +213,31 @@ impl<P: Probe> EvolutionaryLoop<P> {
             };
             probes_sent += 1;
 
-            // Classify.
-            let signals = self.signal_set.run(&candidate, &baseline, &resp);
+            // Classify — then filter through baseline profile.
+            let raw_signals = self.signal_set.run(&candidate, &baseline, &resp);
+            let signals = baseline_profile.filter(&raw_signals);
             let score   = self.feedback.score(&signals);
             let is_conf = self.feedback.is_confirmed(&signals);
 
-            // Corpus evolution.
+            // Corpus evolution — only filtered signals affect decisions.
             if self.feedback.is_interesting(&signals) {
                 let best = best_signal_from(&signals);
                 let entry = CorpusEntry::discovered(candidate.clone(), best, score, parent_idx);
                 self.corpus.push_discovered(entry);
                 self.corpus.boost_energy(parent_idx, 1);
 
+                // Compute ambient signals — what the baseline explained away.
+                let filtered_kinds: std::collections::HashSet<&str> =
+                    signals.iter().map(|s| s.kind()).collect();
+                let ambient: Vec<Signal> = raw_signals
+                    .into_iter()
+                    .filter(|s| !filtered_kinds.contains(s.kind()))
+                    .collect();
+
                 let hit = EvolutionaryHit {
                     payload: candidate,
                     signals,
+                    ambient,
                     score,
                     parent_idx,
                     confirmed: is_conf,
@@ -239,6 +258,7 @@ impl<P: Probe> EvolutionaryLoop<P> {
             interesting,
             probes_sent,
             final_corpus_size: self.corpus.len(),
+            baseline_profile,
         })
     }
 }

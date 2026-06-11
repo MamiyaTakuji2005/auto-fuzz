@@ -496,15 +496,7 @@ impl<P: Probe> Fuzzer<P> {
             body: String::new(),
         };
 
-        // ── Pre-flight: profile the baseline ──────────────────────────
-        // Send the empty request. Run it through the same classifiers.
-        // Subtract ambient signals so only payload-specific results survive.
-        let baseline_resp = self.probe.send(&baseline_req).await
-            .map_err(|e| format!("baseline probe failed: {e}"))?;
-        let profile = BaselineProfile::capture(&baseline_resp, &self.preset.signal_set);
-
         // ── Build the engine ──────────────────────────────────────────
-        // Arc<P> implements Probe, so we can pass it directly — no unwrap needed.
         let probe = self.probe.clone();
 
         let sampler = WeightedSampler::new(
@@ -541,24 +533,29 @@ impl<P: Probe> Fuzzer<P> {
             injection.apply(&url, &method, payload)
         };
 
+        let baseline_req = Request {
+            url: self.target_url.clone(),
+            method: self.method.clone(),
+            headers: HashMap::new(),
+            body: String::new(),
+        };
+
         let outcome = loop_.run(&baseline_req, inject).await?;
 
-        // ── Post-filter: apply baseline profile to results ────────────
+        // Baseline filtering happened inside the loop already.
+        // The outcome carries pre-filtered signals + ambient + profile.
+        let profile = &outcome.baseline_profile;
         let confidence = profile.confidence();
+
         let to_hit = |h: &EvolutionaryHit| {
-            let raw: Vec<String> = h.signals.iter().map(|s| s.kind().to_string()).collect();
-            let filtered = profile.filter(&h.signals);
-            let keep: HashSet<String> = filtered.iter().map(|s| s.kind().to_string()).collect();
-            let signals: Vec<String> = filtered.iter().map(|s| s.kind().to_string()).collect();
-            let suppressed: Vec<String> = raw.iter().filter(|k| !keep.contains(*k)).cloned().collect();
             Hit {
                 payload: h.payload.clone(),
                 raw_score: h.score,
                 confidence,
                 adjusted_score: h.score as f32 * confidence,
                 confirmed: h.confirmed && confidence > 0.3,
-                signals,
-                suppressed,
+                signals: h.signals.iter().map(|s| s.kind().to_string()).collect(),
+                suppressed: h.ambient.iter().map(|s| s.kind().to_string()).collect(),
             }
         };
 
