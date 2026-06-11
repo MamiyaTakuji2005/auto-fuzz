@@ -24,6 +24,10 @@ use crate::baseline::BaselineProfile;
 use crate::evolutionary::atoms::WeightedSampler;
 use crate::evolutionary::havoc::HavocMutator;
 use crate::evolutionary::corpus::{SeedCorpus, CorpusEntry, Feedback, EvaluationContext};
+
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 use crate::signals::signal::{Signal, SignalSet, ProbeResponse};
 use crate::signals::{Probe, Request};
 
@@ -78,6 +82,9 @@ pub struct EvolutionaryLoop<P> {
     pub request_timeout: std::time::Duration,
     /// When true, break on the first confirmed hit. Default false maximises recall.
     pub stop_on_confirmation: bool,
+    /// When true, skip probing a candidate that was already sent this run.
+    /// Prevents wasted probes on duplicate payloads. Default true.
+    pub dedup_candidates: bool,
     /// Deterministic RNG seed. `None` (default) samples from entropy.
     /// Setting a seed makes the corpus evolution and probe order reproducible.
     pub rng_seed: Option<u64>,
@@ -104,6 +111,7 @@ impl<P: Probe> EvolutionaryLoop<P> {
             // Architecture intent: fuzzer = maximum recall. Caller opts in to
             // early-exit via `stop_on_first_hit()`.
             stop_on_confirmation: false,
+            dedup_candidates: true,
             rng_seed: None,
         }
     }
@@ -139,6 +147,14 @@ impl<P: Probe> EvolutionaryLoop<P> {
     /// Use for cheap surgical probes; the default loop maximises recall.
     pub fn stop_on_first_hit(mut self) -> Self {
         self.stop_on_confirmation = true;
+        self
+    }
+
+    /// Enable or disable candidate-level deduplication.
+    /// When enabled (default), duplicate payloads are skipped before probing.
+    /// Disable for deterministic tests with single-atom generators.
+    pub fn with_dedup(mut self, enabled: bool) -> Self {
+        self.dedup_candidates = enabled;
         self
     }
 
@@ -190,6 +206,7 @@ impl<P: Probe> EvolutionaryLoop<P> {
         let mut hits: Vec<EvolutionaryHit>        = Vec::new();
         let mut interesting: Vec<EvolutionaryHit> = Vec::new();
         let mut probes_sent = 0usize;
+        let mut tried: HashSet<u64> = HashSet::new();
 
         // Initial sync — seed the splice corpus once before the loop.
         self.havoc.update_corpus(self.corpus.all_payloads());
@@ -205,6 +222,15 @@ impl<P: Probe> EvolutionaryLoop<P> {
             } else {
                 self.havoc.mutate(&seed_payload)
             };
+
+            // Candidate-level dedup: skip duplicates before probing.
+            if self.dedup_candidates {
+                let mut hasher = DefaultHasher::new();
+                candidate.hash(&mut hasher);
+                if !tried.insert(hasher.finish()) {
+                    continue;
+                }
+            }
 
             // Probe.
             let req = inject(&candidate);
@@ -402,6 +428,7 @@ mod tests {
         EvolutionaryLoop::new(probe, corpus, sampler, havoc, fb)
             .with_gen_ratio(1.0)
             .with_max_probes(10)
+            .with_dedup(false)
     }
 
     #[tokio::test]
