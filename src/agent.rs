@@ -563,7 +563,7 @@ impl<P: Probe> Fuzzer<P> {
         };
 
         Ok(FuzzResult {
-            confirmed: outcome.hits.iter().map(to_hit).collect(),
+            confirmed: outcome.hits.iter().map(to_hit).filter(|h| h.confirmed).collect(),
             interesting: outcome.interesting.iter().map(to_hit).collect(),
             probes_sent: outcome.probes_sent,
             corpus_size: outcome.final_corpus_size,
