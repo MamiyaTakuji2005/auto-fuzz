@@ -249,12 +249,19 @@ impl<P: Probe> EvolutionaryLoop<P> {
             let Some(parent_idx) = self.corpus.schedule(&mut rng) else { break };
             let seed_payload = self.corpus.entry(parent_idx).unwrap().payload.clone();
 
-            // Generation vs mutation decision.
-            let candidate = if rng.gen::<f32>() < self.gen_ratio {
-                self.sampler.apply_chain(&seed_payload, &mut rng)
-            } else {
-                self.havoc.mutate(&seed_payload)
-            };
+            // Generation vs mutation decision — retry on no-op mutations.
+            const MAX_NOOP_RETRIES: usize = 3;
+            let mut candidate = String::new();
+            for retry in 0..=MAX_NOOP_RETRIES {
+                candidate = if rng.gen::<f32>() < self.gen_ratio {
+                    self.sampler.apply_chain(&seed_payload, &mut rng)
+                } else {
+                    self.havoc.mutate(&seed_payload)
+                };
+                if candidate != seed_payload || retry == MAX_NOOP_RETRIES {
+                    break;
+                }
+            }
 
             // Candidate-level dedup: skip duplicates before probing.
             if self.dedup_candidates {
