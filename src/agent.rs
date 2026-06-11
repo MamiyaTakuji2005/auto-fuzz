@@ -504,9 +504,8 @@ impl<P: Probe> Fuzzer<P> {
         let profile = BaselineProfile::capture(&baseline_resp, &self.preset.signal_set);
 
         // ── Build the engine ──────────────────────────────────────────
-        // Unwrap the Arc to get P back (refcount is 1 after the pre-flight).
-        let probe = Arc::try_unwrap(self.probe)
-            .unwrap_or_else(|_| panic!("probe still referenced after pre-flight"));
+        // Arc<P> implements Probe, so we can pass it directly — no unwrap needed.
+        let probe = self.probe.clone();
 
         let sampler = WeightedSampler::new(
             self.preset.atoms,
