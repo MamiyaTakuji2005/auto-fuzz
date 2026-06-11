@@ -81,6 +81,17 @@ pub struct EvolutionaryOutcome {
     pub final_corpus_size: usize,
     /// Baseline profile captured during the run (confidence, ambient signals).
     pub baseline_profile: BaselineProfile,
+    // ── Diagnostics ────────────────────────────────────────────────────────
+    /// Transport errors (connection refused, DNS failure, TLS, etc.).
+    pub probe_errors: usize,
+    /// Probes that timed out before the server responded.
+    pub timeouts: usize,
+    /// Candidate duplicates skipped by the dedup filter.
+    pub duplicate_candidates_skipped: usize,
+    /// Candidates rejected for exceeding `PayloadPolicy::max_len`.
+    pub oversized_candidates_skipped: usize,
+    /// No-op mutations where the candidate was identical to the seed.
+    pub mutation_noops: usize,
 }
 
 impl EvolutionaryOutcome {
@@ -238,7 +249,12 @@ impl<P: Probe> EvolutionaryLoop<P> {
         };
         let mut hits: Vec<EvolutionaryHit>        = Vec::new();
         let mut interesting: Vec<EvolutionaryHit> = Vec::new();
-        let mut probes_sent = 0usize;
+        let mut probes_sent  = 0usize;
+        let mut probe_errors = 0usize;
+        let mut timeouts     = 0usize;
+        let mut duplicates_skipped  = 0usize;
+        let mut oversized_skipped   = 0usize;
+        let mut mutation_noops      = 0usize;
         let mut tried: HashSet<u64> = HashSet::new();
 
         // Initial sync — seed the splice corpus once before the loop.
@@ -258,9 +274,13 @@ impl<P: Probe> EvolutionaryLoop<P> {
                 } else {
                     self.havoc.mutate(&seed_payload)
                 };
-                if candidate != seed_payload || retry == MAX_NOOP_RETRIES {
-                    break;
+                if candidate == seed_payload {
+                    mutation_noops += 1;
+                    if retry < MAX_NOOP_RETRIES {
+                        continue;
+                    }
                 }
+                break;
             }
 
             // Candidate-level dedup: skip duplicates before probing.
@@ -268,12 +288,14 @@ impl<P: Probe> EvolutionaryLoop<P> {
                 let mut hasher = DefaultHasher::new();
                 candidate.hash(&mut hasher);
                 if !tried.insert(hasher.finish()) {
+                    duplicates_skipped += 1;
                     continue;
                 }
             }
 
             // Length gate: discard oversized candidates before they hit transport.
             if self.payload_policy.reject_oversized && candidate.len() > self.payload_policy.max_len {
+                oversized_skipped += 1;
                 continue;
             }
 
@@ -283,7 +305,8 @@ impl<P: Probe> EvolutionaryLoop<P> {
                 self.request_timeout, self.probe.send(&req)).await
             {
                 Ok(Ok(r))  => r,
-                Ok(Err(_)) | Err(_) => { probes_sent += 1; continue; }
+                Ok(Err(_)) => { probe_errors += 1; probes_sent += 1; continue; }
+                Err(_)     => { timeouts += 1; probes_sent += 1; continue; }
             };
             probes_sent += 1;
 
@@ -348,6 +371,11 @@ impl<P: Probe> EvolutionaryLoop<P> {
             probes_sent,
             final_corpus_size: self.corpus.len(),
             baseline_profile,
+            probe_errors,
+            timeouts,
+            duplicate_candidates_skipped: duplicates_skipped,
+            oversized_candidates_skipped: oversized_skipped,
+            mutation_noops,
         })
     }
 }
