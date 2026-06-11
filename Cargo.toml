@@ -9,9 +9,23 @@ repository = "https://github.com/MamiyaTakuji2005/auto-fuzz"
 
 [dependencies]
 rand = { version = "0.8", features = ["small_rng"] }
-tokio = { version = "1", features = ["time", "rt", "macros"] }
+tokio = { version = "1", features = ["time", "rt-multi-thread", "macros", "sync"] }
 async-trait = "0.1"
 regex = "1"
 
+# Optional: HTTP probing for fuzz-gui binary
+reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls"], optional = true }
+egui = { version = "0.31", optional = true }
+eframe = { version = "0.31", optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+
+[[bin]]
+name = "fuzz-gui"
+path = "src/bin/fuzz-gui.rs"
+required-features = ["gui"]
+
+[features]
+default = []
+gui = ["dep:reqwest", "dep:egui", "dep:eframe"]
