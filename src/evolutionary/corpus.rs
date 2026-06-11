@@ -13,8 +13,10 @@
 //! power schedule.
 
 use rand::Rng;
-use crate::signals::signal::{Signal, ReflectionEncoding};
+use crate::signals::signal::{Signal, ReflectionEncoding, ProbeResponse};
+use crate::signals::Request;
 use std::collections::HashSet;
+use std::time::Duration;
 
 // ── CorpusEntry ───────────────────────────────────────────────────────────────
 
@@ -175,8 +177,30 @@ impl Default for SeedCorpus {
 
 // ── Feedback ──────────────────────────────────────────────────────────────────
 
-/// Result of evaluating a set of probe signals.
-/// Produced by a single pass through the signal list — no repeated iteration.
+/// Full evaluation context passed to feedback.
+///
+/// Feedback implementors can inspect anything — payload, request, baseline,
+/// response, raw vs filtered signals, timing, transport errors — not just
+/// the post-filtered signal list. This makes the fuzzer truly universal.
+pub struct EvaluationContext<'a> {
+    /// The candidate payload being probed.
+    pub payload: &'a str,
+    /// The HTTP request that was sent.
+    pub request: &'a Request,
+    /// Baseline response (same-shape, empty payload).
+    pub baseline: &'a ProbeResponse,
+    /// Probe response.
+    pub response: &'a ProbeResponse,
+    /// Transport error (if the probe failed).
+    pub probe_error: Option<&'a str>,
+    /// All signals before baseline filtering.
+    pub raw_signals: &'a [Signal],
+    /// Signals after baseline filtering (payload-specific).
+    pub filtered_signals: &'a [Signal],
+}
+
+/// Result of evaluating a probe. Produced by a single pass through the
+/// evaluation context — no repeated iteration over signals.
 #[derive(Debug, Clone)]
 pub struct FeedbackEval {
     /// Energy to assign (0 = discard, 1–12 = keep with this weight).
@@ -199,13 +223,13 @@ impl FeedbackEval {
 /// Decides if a probe result is interesting enough to add to the corpus, and
 /// how much energy to assign. This is the LibAFL `Feedback` concept.
 ///
-/// The separation from the loop and the mutator is the point: you can swap in
-/// agent feedback ("the AI said this is interesting"), coverage feedback
-/// (structural response diff), or compose multiple feedbacks.
+/// Receives the full `EvaluationContext` — not just signals. This lets
+/// implementations inspect payloads, requests, baseline vs response, timing,
+/// transport errors, and raw vs filtered signals. Old signal-only eval is
+/// just `ctx.filtered_signals`.
 pub trait Feedback: Send + Sync {
-    /// Evaluate the signals in a single pass. Returns all decisions at once
-    /// to avoid repeated iteration over the signal list.
-    fn evaluate(&self, signals: &[Signal]) -> FeedbackEval;
+    /// Evaluate the probe in context. Returns all decisions at once.
+    fn evaluate(&self, ctx: &EvaluationContext<'_>) -> FeedbackEval;
 }
 
 /// Signal-strength feedback. Uses the same ranking as the existing
@@ -221,12 +245,12 @@ impl Default for HttpFeedback {
 }
 
 impl Feedback for HttpFeedback {
-    fn evaluate(&self, signals: &[Signal]) -> FeedbackEval {
+    fn evaluate(&self, ctx: &EvaluationContext<'_>) -> FeedbackEval {
         let mut best = Signal::NoEffect;
         let mut best_rank: u8 = 0;
         let mut confirmed = false;
 
-        for s in signals {
+        for s in ctx.filtered_signals {
             let rank = match s {
                 Signal::Error { .. } => { confirmed = true; 6 }
                 Signal::TimeDelay { .. } => { confirmed = true; 5 }
@@ -289,13 +313,31 @@ mod tests {
     fn http_feedback_scores_correctly() {
         let fb = HttpFeedback::default();
         let error_signals = vec![Signal::Error { family: "mysql".into(), snippet: "syntax".into() }];
-        let eval = fb.evaluate(&error_signals);
+        let ctx = EvaluationContext {
+            payload: "'",
+            request: &crate::signals::Request { url: "".into(), method: "GET".into(), headers: std::collections::HashMap::new(), body: "".into() },
+            baseline: &crate::signals::signal::ProbeResponse { status: 200, body: vec![], duration: Duration::from_millis(1) },
+            response: &crate::signals::signal::ProbeResponse { status: 500, body: vec![], duration: Duration::from_millis(10) },
+            probe_error: None,
+            raw_signals: &error_signals,
+            filtered_signals: &error_signals,
+        };
+        let eval = fb.evaluate(&ctx);
         assert_eq!(eval.score, 6);
         assert!(eval.interesting);
         assert!(eval.confirmed);
 
         let no_effect = vec![Signal::NoEffect];
-        let eval = fb.evaluate(&no_effect);
+        let ctx = EvaluationContext {
+            payload: "x",
+            request: &crate::signals::Request { url: "".into(), method: "GET".into(), headers: std::collections::HashMap::new(), body: "".into() },
+            baseline: &crate::signals::signal::ProbeResponse { status: 200, body: vec![], duration: Duration::from_millis(1) },
+            response: &crate::signals::signal::ProbeResponse { status: 200, body: vec![], duration: Duration::from_millis(1) },
+            probe_error: None,
+            raw_signals: &no_effect,
+            filtered_signals: &no_effect,
+        };
+        let eval = fb.evaluate(&ctx);
         assert_eq!(eval.score, 0);
         assert!(!eval.interesting);
     }

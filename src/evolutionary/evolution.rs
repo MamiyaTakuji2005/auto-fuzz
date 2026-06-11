@@ -23,7 +23,7 @@ use rand::Rng;
 use crate::baseline::BaselineProfile;
 use crate::evolutionary::atoms::WeightedSampler;
 use crate::evolutionary::havoc::HavocMutator;
-use crate::evolutionary::corpus::{SeedCorpus, CorpusEntry, Feedback};
+use crate::evolutionary::corpus::{SeedCorpus, CorpusEntry, Feedback, EvaluationContext};
 use crate::signals::signal::{Signal, SignalSet, ProbeResponse};
 use crate::signals::{Probe, Request};
 
@@ -227,7 +227,19 @@ impl<P: Probe> EvolutionaryLoop<P> {
             // Classify — then filter through baseline profile.
             let raw_signals = self.signal_set.run(&candidate, &baseline, &resp);
             let signals = baseline_profile.filter(&raw_signals);
-            let eval = self.feedback.evaluate(&signals);
+
+            // Full context for feedback — inspect payload, request, baseline,
+            // response, raw vs filtered signals, timing, transport errors.
+            let ctx = EvaluationContext {
+                payload: &candidate,
+                request: &req,
+                baseline: &baseline,
+                response: &resp,
+                probe_error: None,
+                raw_signals: &raw_signals,
+                filtered_signals: &signals,
+            };
+            let eval = self.feedback.evaluate(&ctx);
 
             // Corpus evolution — only filtered signals affect decisions.
             if eval.interesting {

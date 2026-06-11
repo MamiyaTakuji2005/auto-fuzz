@@ -55,11 +55,11 @@ impl Probe for MockServer {
 
 struct SimpleFeedback;
 impl Feedback for SimpleFeedback {
-    fn evaluate(&self, signals: &[Signal]) -> FeedbackEval {
+    fn evaluate(&self, ctx: &EvaluationContext<'_>) -> FeedbackEval {
         let mut best = Signal::NoEffect;
         let mut best_rank: u8 = 0;
         let mut confirmed = false;
-        for s in signals {
+        for s in ctx.filtered_signals {
             let rank = match s {
                 Signal::Error { .. } => { confirmed = true; 6 }
                 Signal::StatusDelta { .. } => 4,
@@ -160,9 +160,19 @@ async fn main() {
     println!("PROBE LOG  (●=interesting ·=no signal  ✓=confirmed):\n");
     for (i, payload) in log.iter().enumerate() {
         let resp = simulate(payload);
-        let signals = SignalSet::defaults().run(payload, &simulate(""), &resp);
+        let baseline = simulate("");
+        let signals = SignalSet::defaults().run(payload, &baseline, &resp);
+        let ctx = EvaluationContext {
+            payload,
+            request: &Request { url: "".into(), method: "GET".into(), headers: std::collections::HashMap::new(), body: "".into() },
+            baseline: &baseline,
+            response: &resp,
+            probe_error: None,
+            raw_signals: &signals,
+            filtered_signals: &signals,
+        };
         let fb = SimpleFeedback;
-        let eval = fb.evaluate(&signals);
+        let eval = fb.evaluate(&ctx);
         let icon = if eval.confirmed { "✓" } else if eval.interesting { "●" } else { "·" };
         let sigs: Vec<String> = signals.iter().map(|s| s.kind().to_string()).collect();
         println!(
