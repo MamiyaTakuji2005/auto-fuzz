@@ -279,13 +279,17 @@ impl HavocMutator {
     }
 
     /// Apply `ops_per_step` random operators in sequence to `payload`.
+    /// All ops are generated upfront (stack-allocated) so RNG state for
+    /// op selection is independent of mutation-side RNG usage.
     pub fn mutate(&mut self, payload: &str) -> String {
-        let ops: Vec<HavocOp> = (0..self.ops_per_step)
-            .map(|_| HavocOp::random(&mut self.rng))
-            .collect();
+        const MAX_OPS: usize = 32;
+        let n = self.ops_per_step;
+        let ops: [HavocOp; MAX_OPS] = std::array::from_fn(|i| {
+            if i < n { HavocOp::random(&mut self.rng) } else { HavocOp::InsertToken }
+        });
         let mut result = payload.to_string();
-        for op in ops {
-            result = self.apply_op(&result, op);
+        for i in 0..n {
+            result = self.apply_op(&result, ops[i]);
         }
         result
     }
