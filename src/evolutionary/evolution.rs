@@ -24,7 +24,7 @@ use crate::baseline::BaselineProfile;
 use crate::evolutionary::atoms::WeightedSampler;
 use crate::evolutionary::havoc::HavocMutator;
 use crate::evolutionary::corpus::{SeedCorpus, CorpusEntry, Feedback};
-use crate::signals::signal::{Signal, SignalSet};
+use crate::signals::signal::{Signal, SignalSet, ProbeResponse};
 use crate::signals::{Probe, Request};
 
 // ── Result types ──────────────────────────────────────────────────────────────
@@ -168,6 +168,17 @@ impl<P: Probe> EvolutionaryLoop<P> {
             Ok(Err(e)) => return Err(e),
             Err(_)     => return Err("baseline timed out".into()),
         };
+        self.run_with_baseline(baseline, inject).await
+    }
+
+    /// Run with a pre-captured baseline response. The caller fetches the
+    /// baseline once and passes it in — the loop uses it for profiling and
+    /// signal comparison without making a second baseline request.
+    pub async fn run_with_baseline<F>(mut self, baseline: ProbeResponse, inject: F)
+        -> Result<EvolutionaryOutcome, String>
+    where
+        F: Fn(&str) -> Request,
+    {
 
         // ── Profile the baseline — what ambient signals exist? ────────
         let baseline_profile = BaselineProfile::capture(&baseline, &self.signal_set);

@@ -18,12 +18,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use url::Url;
 
-use crate::baseline::BaselineProfile;
 use crate::evolutionary::*;
 use crate::payloads;
 use crate::signals::signal::*;
-use crate::signals::{Probe, Request};
-use std::collections::{HashMap, HashSet};
+use crate::signals::{Probe, Request, ProbeResponse};
+use std::collections::HashMap;
 use std::time::Duration;
 
 // ── Arc blanket impl for Probe ──────────────────────────────────────────
@@ -489,13 +488,6 @@ impl<P: Probe> Fuzzer<P> {
     // ── Run ───────────────────────────────────────────────────────────
 
     pub async fn run(self) -> Result<FuzzResult, String> {
-        let baseline_req = Request {
-            url: self.target_url.clone(),
-            method: self.method.clone(),
-            headers: HashMap::new(),
-            body: String::new(),
-        };
-
         // ── Build the engine ──────────────────────────────────────────
         let probe = self.probe.clone();
 
@@ -526,24 +518,23 @@ impl<P: Probe> Fuzzer<P> {
         if self.preset.stop_on_confirmation { loop_ = loop_.stop_on_first_hit(); }
         if let Some(s) = self.replay_seed { loop_ = loop_.with_seed(s); }
 
+        // ── Baseline: same shape as fuzzed requests ──────────────────
+        // Use the InjectionPoint with an empty payload so the baseline
+        // matches the fuzzed request shape exactly.
         let injection = self.injection.clone();
         let url = self.target_url.clone();
         let method = self.method.clone();
+        let baseline_req = injection.apply(&url, &method, "");
+        let baseline_resp = self.probe.send(&baseline_req).await
+            .map_err(|e| format!("baseline probe failed: {e}"))?;
+
         let inject = move |payload: &str| -> Request {
             injection.apply(&url, &method, payload)
         };
 
-        let baseline_req = Request {
-            url: self.target_url.clone(),
-            method: self.method.clone(),
-            headers: HashMap::new(),
-            body: String::new(),
-        };
+        // Run with pre-captured baseline — no duplicate request.
+        let outcome = loop_.run_with_baseline(baseline_resp, inject).await?;
 
-        let outcome = loop_.run(&baseline_req, inject).await?;
-
-        // Baseline filtering happened inside the loop already.
-        // The outcome carries pre-filtered signals + ambient + profile.
         let profile = &outcome.baseline_profile;
         let confidence = profile.confidence();
 
