@@ -192,28 +192,62 @@ impl Classifier for ReflectionClassifier {
         if payload.len() < 3 { return None; }
         let body = probe.body_text();
         let baseline_body = baseline.body_text();
-        // Literal first — cheapest. Only signal if not already present in baseline.
+
+        // Literal — only signal if NOT already in baseline.
         if body.contains(payload) && !baseline_body.contains(payload) {
             return Some(Signal::Reflected { encoding: ReflectionEncoding::Literal });
         }
-        // Percent-encoded — check both cases (%3C and %3c both appear in the wild).
-        let percent_upper: String = payload.bytes().map(|b| format!("%{:02X}", b)).collect();
-        let percent_lower: String = payload.bytes().map(|b| format!("%{:02x}", b)).collect();
-        if body.contains(&percent_upper) || body.contains(&percent_lower) {
+
+        // Percent-encoded (RFC 3986 — only encode non-unreserved bytes).
+        // Both uppercase (%3C) and lowercase (%3c) appear in the wild.
+        let percent_upper = percent_encode(payload, true);
+        let percent_lower = percent_encode(payload, false);
+        if (body.contains(&percent_upper) || body.contains(&percent_lower))
+            && !baseline_body.contains(&percent_upper)
+            && !baseline_body.contains(&percent_lower)
+        {
             return Some(Signal::Reflected { encoding: ReflectionEncoding::PercentEncoded });
         }
-        // HTML-encoded (just the dangerous chars).
-        let html_encoded = payload
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-            .replace('\'', "&#x27;");
-        if html_encoded != payload && body.contains(&html_encoded) {
+
+        // HTML-encoded — only the dangerous characters.
+        let html_encoded = html_encode(payload);
+        if !html_encoded.is_empty()
+            && body.contains(&html_encoded)
+            && !baseline_body.contains(&html_encoded)
+        {
             return Some(Signal::Reflected { encoding: ReflectionEncoding::HtmlEncoded });
         }
         None
     }
+}
+
+/// Percent-encode a string per RFC 3986. Only encodes bytes outside the
+/// unreserved set (A-Z, a-z, 0-9, -, _, ., ~). Upper/lower case on hex digits
+/// is caller-selectable.
+fn percent_encode(s: &str, upper: bool) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+                String::from_utf8(vec![b]).unwrap()
+            } else if upper {
+                format!("%{:02X}", b)
+            } else {
+                format!("%{:02x}", b)
+            }
+        })
+        .collect()
+}
+
+/// HTML-encode the dangerous characters. Returns an empty string if no
+/// encoding was applied (payload contained no dangerous chars).
+fn html_encode(s: &str) -> String {
+    let result = s
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;");
+    if result == s { String::new() } else { result }
 }
 
 /// Time-delay signal: probe took noticeably longer than baseline.
@@ -353,16 +387,50 @@ mod tests {
     #[test]
     fn reflection_detects_literal_and_encoded() {
         let c = ReflectionClassifier;
-        let baseline = resp(200, "", 10);
+        let empty = resp(200, "", 10);
         assert!(matches!(
-            c.classify("<svg>", &baseline, &resp(200, "hi <svg> there", 10)),
+            c.classify("<svg>", &empty, &resp(200, "hi <svg> there", 10)),
             Some(Signal::Reflected { encoding: ReflectionEncoding::Literal })
         ));
         assert!(matches!(
-            c.classify("<svg>", &baseline, &resp(200, "hi &lt;svg&gt; there", 10)),
+            c.classify("<svg>", &empty, &resp(200, "hi &lt;svg&gt; there", 10)),
             Some(Signal::Reflected { encoding: ReflectionEncoding::HtmlEncoded })
         ));
-        assert!(c.classify("<svg>", &baseline, &resp(200, "no payload here", 10)).is_none());
+        assert!(c.classify("<svg>", &empty, &resp(200, "no payload here", 10)).is_none());
+    }
+
+    #[test]
+    fn percent_encoding_only_encodes_special_chars() {
+        // <svg> → %3Csvg%3E, NOT %3C%73%76%67%3E
+        assert_eq!(percent_encode("<svg>", true), "%3Csvg%3E");
+        assert_eq!(percent_encode("abc123", true), "abc123");
+        assert_eq!(percent_encode("hello world", true), "hello%20world");
+        assert_eq!(percent_encode("' OR 1=1--", true), "%27%20OR%201%3D1--");
+    }
+
+    #[test]
+    fn encoded_in_baseline_suppresses_reflection() {
+        let c = ReflectionClassifier;
+        // Baseline already contains the percent-encoded form
+        let baseline = resp(200, "%3Csvg%3E", 10);
+        let probe = resp(200, "%3Csvg%3E more", 10);
+        assert!(c.classify("<svg>", &baseline, &probe).is_none(),
+            "percent-encoded form in baseline should suppress reflection");
+
+        // Baseline contains the HTML-encoded form
+        let baseline2 = resp(200, "&lt;svg&gt;", 10);
+        let probe2 = resp(200, "&lt;svg&gt; more", 10);
+        assert!(c.classify("<svg>", &baseline2, &probe2).is_none(),
+            "HTML-encoded form in baseline should suppress reflection");
+    }
+
+    #[test]
+    fn literal_in_baseline_suppresses_reflection() {
+        let c = ReflectionClassifier;
+        let baseline = resp(200, "<svg> already here", 10);
+        let probe = resp(200, "<svg> already here and more", 10);
+        assert!(c.classify("<svg>", &baseline, &probe).is_none(),
+            "literal in baseline should suppress reflection");
     }
 
     #[test]
