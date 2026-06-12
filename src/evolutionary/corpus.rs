@@ -67,10 +67,10 @@ pub struct SeedCorpus {
     entries: Vec<CorpusEntry>,
     total_energy: u32,
     index_by_payload: HashMap<String, usize>,
-    /// Buckets by energy level (1..12). Bucket 0 is unused.
-    buckets: [Vec<usize>; 13],
+    /// Buckets by energy level (1..MAX_ENERGY). Bucket 0 is unused.
+    buckets: [Vec<usize>; 65],
     /// Precomputed per-bucket weight = bucket.len() * energy.
-    bucket_weights: [u32; 13],
+    bucket_weights: [u32; 65],
 }
 
 impl SeedCorpus {
@@ -79,8 +79,8 @@ impl SeedCorpus {
             entries: Vec::new(),
             total_energy: 0,
             index_by_payload: HashMap::new(),
-            buckets: Default::default(),
-            bucket_weights: [0; 13],
+            buckets: [(); 65].map(|_| Vec::new()),
+            bucket_weights: [0; 65],
         }
     }
 
@@ -163,7 +163,7 @@ impl SeedCorpus {
         let (old, new) = {
             if let Some(e) = self.entries.get_mut(idx) {
                 let old = e.energy;
-                e.energy = e.energy.saturating_add(by).min(12);
+                e.energy = e.energy.saturating_add(by).min(64);
                 (old, e.energy)
             } else {
                 return;
@@ -185,7 +185,7 @@ impl SeedCorpus {
             return Some(0);
         }
         let mut pick = rng.gen_range(0..self.total_energy);
-        for energy in 1..=12u8 {
+        for energy in 1..=64u8 {
             let w = self.bucket_weights[energy as usize];
             if pick < w {
                 let bucket = &self.buckets[energy as usize];

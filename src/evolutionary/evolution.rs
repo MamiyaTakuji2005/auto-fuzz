@@ -376,7 +376,7 @@ impl<P: Probe> EvolutionaryLoop<P> {
                 if self.corpus.len() > prev_len {
                     self.havoc.push_corpus_payload(candidate.clone());
                 }
-                self.corpus.boost_energy(parent_idx, 1);
+                self.corpus.boost_energy(parent_idx, eval.score);
 
                 // Compute ambient signals — what the baseline explained away.
                 let filtered_kinds: std::collections::HashSet<&str> =

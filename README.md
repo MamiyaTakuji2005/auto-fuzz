@@ -8,7 +8,7 @@ Generates candidate payloads by blending two strategies: chain-based grammar gen
 
 Probes are sent through a `Probe` trait (HTTP, TCP, mock — anything that implements `async fn send`). Results are classified by a composable set of signal detectors (status, size, reflection, timing, error patterns, body diff). A baseline profile captured from a clean request filters out ambient noise before feedback evaluation decides what's interesting.
 
-Interesting payloads join a living corpus. Entries carry energy scores (1–12); a power schedule picks parents proportional to energy, so payloads that triggered strong signals get mutated more often. The corpus never shrinks, but duplicates are rejected (energy is upgraded if the same payload is rediscovered with a stronger signal).
+Interesting payloads join a living corpus. Entries carry energy scores (1–64); a power schedule picks parents proportional to energy, so payloads that triggered strong signals get mutated more often. The corpus never shrinks, but duplicates are rejected (energy is upgraded if the same payload is rediscovered with a stronger signal).
 
 The loop stops when the probe budget is spent, a confirmed hit is found (if `stop_on_confirmation` is set), or the corpus runs dry.
 
@@ -20,7 +20,7 @@ The loop stops when the probe budget is spent, a confirmed hit is found (if `sto
 
 **Baseline-aware signals** — a clean probe often triggers false signals (status codes, error pages, WAF fingerprints). Profiling the baseline once and filtering ambient signals per-variant (not just per-kind) keeps the corpus from filling with noise.
 
-**Corpus power schedule** — LibAFL-style energy-weighted scheduling. Not every interesting payload is equally interesting — the ones that triggered errors or time delays deserve more CPU. Energy climbs with each interesting child (ratchet upward), so signal-rich lineages deepen their draw dominance over time. This is intentional: the fuzzer exploits depth when it finds signal, rather than balancing explore/exploit.
+**Corpus power schedule** — LibAFL-style energy-weighted scheduling. Not every interesting payload is equally interesting — the ones that triggered errors or time delays deserve more CPU. Energy climbs with each interesting child (ratchet upward, proportional to signal score), so signal-rich lineages deepen their draw dominance over time. The 1–64 cap preserves asymmetry among hot leads — a time-delay parent climbs faster than a body-diff one. This is intentional: the fuzzer exploits depth when it finds signal, rather than balancing explore/exploit.
 
 **Determinism** — one seed produces the same probe sequence every time. The loop and havoc RNGs are derived from a single seed via a golden-ratio offset so they stay independent but reproducible. Switch to `ChaCha12Rng` for bit-identical replay across Rust versions and platforms.
 
