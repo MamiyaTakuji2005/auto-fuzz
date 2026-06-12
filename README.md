@@ -20,7 +20,7 @@ The loop stops when the probe budget is spent, a confirmed hit is found (if `sto
 
 **Baseline-aware signals** — a clean probe often triggers false signals (status codes, error pages, WAF fingerprints). Profiling the baseline once and filtering ambient signals per-variant (not just per-kind) keeps the corpus from filling with noise.
 
-**Corpus power schedule** — LibAFL-style energy-weighted scheduling. Not every interesting payload is equally interesting — the ones that triggered errors or time delays deserve more CPU. Energy decays naturally as fuzz_count rises (each mutation child slightly dilutes the parent's draw probability).
+**Corpus power schedule** — LibAFL-style energy-weighted scheduling. Not every interesting payload is equally interesting — the ones that triggered errors or time delays deserve more CPU. Energy climbs with each interesting child (ratchet upward), so signal-rich lineages deepen their draw dominance over time. This is intentional: the fuzzer exploits depth when it finds signal, rather than balancing explore/exploit.
 
 **Determinism** — one seed produces the same probe sequence every time. The loop and havoc RNGs are derived from a single seed via a golden-ratio offset so they stay independent but reproducible. Switch to `ChaCha12Rng` for bit-identical replay across Rust versions and platforms.
 
@@ -36,7 +36,7 @@ Per-iteration CPU cost is kept small so the network round-trip dominates:
 - Operator selection: stack-allocated array, no heap allocation per mutate call
 - Splice sync: incremental push on corpus growth (no full clone)
 - Char-boundary ops: ASCII fast path (direct byte indexing instead of char counting)
-- Candidate dedup: `DefaultHasher` fingerprint → `HashSet<u64>`
+- Candidate dedup: parent-scoped `HashSet<u64>` — resets on each new parent so every lineage explores its full neighbourhood independently
 
 Release binary is ~1 MB (LTO, stripped). No unsafe code.
 
@@ -126,7 +126,7 @@ Pre-built probe sets for common vulnerability classes. Use as seed corpus:
 | Goal | How |
 |------|-----|
 | Deterministic replay | `.with_seed(42)` |
-| Cross-platform replay | `.with_rng_mode(RngMode::ChaCha12).with_seed(42)` |
+| Cross-platform replay | `.with_rng_mode(RngMode::ChaCha12).with_seed(42)` (or `.with_seed(42).with_rng_mode(RngMode::ChaCha12)` — both work) |
 | Only generation | `.with_gen_ratio(1.0)` |
 | Only havoc | `.with_gen_ratio(0.0)` |
 | Freeze corpus | `HttpFeedback { min_corpus_score: 255 }` |
@@ -138,7 +138,8 @@ Pre-built probe sets for common vulnerability classes. Use as seed corpus:
 | One atom only | `atoms = ["X"]` |
 | Custom scoring | `impl Feedback` trait |
 | Custom transport | `impl Probe` trait |
-| Sweep a payload table | `SeedCorpus::from_seeds(payloads::SQLI_PAYLOADS)` |
+| Exact table sweep (no mutation) | `Fuzzer::sql_injection().mode(FuzzMode::Table).target("http://x", "GET").run().await` |
+| Exact user inputs (no mutation) | `Fuzzer::sql_injection().mode(FuzzMode::InputsOnly).seeds([...]).run().await` |
 | Cap payload length | `.with_payload_policy(PayloadPolicy::default())` |
 | Disable candidate dedup | `.with_dedup(false)` |
 
@@ -148,5 +149,5 @@ Pre-built probe sets for common vulnerability classes. Use as seed corpus:
 cargo run --example digits              # demo
 cargo run --example benchmark --release # speed test
 cargo run --bin fuzz-gui --features gui --release  # desktop workbench
-cargo test                              # 73 tests
+cargo test                              # 77 tests
 ```

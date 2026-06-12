@@ -18,6 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use url::Url;
 
+use crate::baseline::BaselineProfile;
 use crate::evolutionary::*;
 use crate::payloads;
 use crate::signals::signal::*;
@@ -91,9 +92,10 @@ impl FuzzResult {
 
 /// What kind of run to execute — table sweep, evolutionary, or hybrid.
 ///
-/// The engine is the same loop; mode just configures the knobs differently.
-/// Presets like `quick_check`, `deep_check`, etc. live at the UI/agent layer
-/// and map to combinations of mode + budget + risk filtering.
+/// Table and InputsOnly are exact sweeps: payloads are sent in order,
+/// no corpus scheduling, no mutation, no randomness.
+/// TableThenEvolutionary and Evolutionary funnel through the standard
+/// evolutionary loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FuzzMode {
     /// Run the exact payload table once, no mutation, no randomness.
@@ -536,9 +538,116 @@ impl<P: Probe> Fuzzer<P> {
     // ── Run ───────────────────────────────────────────────────────────
 
     pub async fn run(self) -> Result<FuzzResult, String> {
-        // ── Build the engine ──────────────────────────────────────────
         let probe = self.probe.clone();
 
+        // ── Baseline: same shape as fuzzed requests ──────────────────
+        let injection = self.injection.clone();
+        let url = self.target_url.clone();
+        let method = self.method.clone();
+        let baseline_req = injection.apply(&url, &method, "");
+        let baseline_resp = self.probe.send(&baseline_req).await
+            .map_err(|e| format!("baseline probe failed: {e}"))?;
+
+        let baseline_profile = BaselineProfile::capture(&baseline_resp, &self.preset.signal_set);
+
+        let inject = move |payload: &str| -> Request {
+            injection.apply(&url, &method, payload)
+        };
+
+        // ── Table / InputsOnly: exact sweep — no corpus, no mutation, no randomness ──
+        if matches!(self.mode, FuzzMode::Table | FuzzMode::InputsOnly) {
+            let entries: Vec<(String, PayloadSource)> = match self.mode {
+                FuzzMode::Table => {
+                    let table = self.preset.table.as_ref()
+                        .ok_or_else(|| "Table mode requires a preset with a payload table".to_string())?;
+                    let preset_name = table.name.clone();
+                    table.cases.iter().enumerate().map(|(i, c)| {
+                        (c.payload.clone(), PayloadSource::Table { preset: preset_name.clone(), index: i })
+                    }).collect()
+                }
+                FuzzMode::InputsOnly => {
+                    self.additional_seeds.iter().enumerate().map(|(i, s)| {
+                        (s.clone(), PayloadSource::UserInput { index: i })
+                    }).collect()
+                }
+                _ => unreachable!(),
+            };
+
+            let signal_set = &self.preset.signal_set;
+            let feedback = &*self.preset.feedback;
+            let budget = self.budget.min(entries.len());
+            let mut hits: Vec<Hit> = Vec::new();
+            let mut interesting: Vec<Hit> = Vec::new();
+            let mut probes_sent = 0usize;
+
+            for (payload, source) in entries.into_iter().take(budget) {
+                let req = inject(&payload);
+                let resp = match tokio::time::timeout(
+                    self.request_timeout, probe.send(&req)).await
+                {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(_)) => { probes_sent += 1; continue; }
+                    Err(_)     => { probes_sent += 1; continue; }
+                };
+                probes_sent += 1;
+
+                // Classify — then filter through baseline profile.
+                let raw_signals = signal_set.run(&payload, &baseline_resp, &resp);
+                let signals = baseline_profile.filter(&raw_signals);
+
+                // Full context for feedback.
+                let ctx = EvaluationContext {
+                    payload: &payload,
+                    request: &req,
+                    baseline: &baseline_resp,
+                    response: &resp,
+                    probe_error: None,
+                    raw_signals: &raw_signals,
+                    filtered_signals: &signals,
+                };
+                let eval = feedback.evaluate(&ctx);
+
+                if eval.interesting {
+                    let filtered_kinds: std::collections::HashSet<&str> =
+                        signals.iter().map(|s| s.kind()).collect();
+                    let ambient: Vec<Signal> = raw_signals
+                        .into_iter()
+                        .filter(|s| !filtered_kinds.contains(s.kind()))
+                        .collect();
+
+                    let confidence = baseline_profile.confidence();
+                    let hit = Hit {
+                        payload,
+                        raw_score: eval.score,
+                        confidence,
+                        adjusted_score: eval.score as f32 * confidence,
+                        confirmed: eval.confirmed && confidence > 0.3,
+                        signals: signals.iter().map(|s| s.kind().to_string()).collect(),
+                        suppressed: ambient.iter().map(|s| s.kind().to_string()).collect(),
+                        source,
+                    };
+
+                    if hit.confirmed {
+                        hits.push(hit.clone());
+                    }
+                    interesting.push(hit);
+
+                    if eval.confirmed && self.stop_on_confirmation {
+                        break;
+                    }
+                }
+            }
+
+            return Ok(FuzzResult {
+                confirmed: hits,
+                interesting,
+                probes_sent,
+                corpus_size: 0,
+                baseline: baseline_profile.summary(),
+            });
+        }
+
+        // ── Evolutionary path (TableThenEvolutionary, Evolutionary) ──
         let sampler = WeightedSampler::new(
             self.preset.atoms,
             self.preset.chain,
@@ -558,27 +667,13 @@ impl<P: Probe> Fuzzer<P> {
             havoc,
             self.preset.feedback,
         )
-        .with_gen_ratio(if matches!(self.mode, FuzzMode::Table | FuzzMode::InputsOnly) { 0.0 } else { self.preset.gen_ratio })
+        .with_gen_ratio(self.preset.gen_ratio)
         .with_max_probes(self.budget)
         .with_signal_set(self.preset.signal_set)
         .with_request_timeout(self.request_timeout);
 
         if self.stop_on_confirmation { loop_ = loop_.stop_on_first_hit(); }
         if let Some(s) = self.replay_seed { loop_ = loop_.with_seed(s); }
-
-        // ── Baseline: same shape as fuzzed requests ──────────────────
-        // Use the InjectionPoint with an empty payload so the baseline
-        // matches the fuzzed request shape exactly.
-        let injection = self.injection.clone();
-        let url = self.target_url.clone();
-        let method = self.method.clone();
-        let baseline_req = injection.apply(&url, &method, "");
-        let baseline_resp = self.probe.send(&baseline_req).await
-            .map_err(|e| format!("baseline probe failed: {e}"))?;
-
-        let inject = move |payload: &str| -> Request {
-            injection.apply(&url, &method, payload)
-        };
 
         // Run with pre-captured baseline — no duplicate request.
         let outcome = loop_.run_with_baseline(baseline_resp, inject).await?;
@@ -589,8 +684,6 @@ impl<P: Probe> Fuzzer<P> {
         let to_hit = |h: &EvolutionaryHit| {
             let source = match self.mode {
                 FuzzMode::Table | FuzzMode::TableThenEvolutionary => {
-                    // Map parent_idx to table index (parent_idx is the seed index in the corpus).
-                    // For table mode, seeds are the table entries in order.
                     if h.parent_idx < self.preset.table.as_ref().map(|t| t.len()).unwrap_or(0) {
                         PayloadSource::Table {
                             preset: self.preset.table.as_ref()
@@ -719,5 +812,86 @@ mod tests {
         let r3 = run_one(probe.clone(), 1).await;
         let r4 = run_one(probe.clone(), 1).await;
         assert_eq!(r3.confirmed.len(), r4.confirmed.len());
+    }
+
+    /// Table mode sends exact payloads in order — no mutation, no randomness.
+    #[tokio::test]
+    async fn table_mode_sends_exact_payloads_in_order() {
+        use std::sync::Mutex;
+
+        struct OrderRecordingProbe {
+            seen: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl Probe for OrderRecordingProbe {
+            async fn send(&self, req: &Request) -> Result<ProbeResponse, String> {
+                self.seen.lock().unwrap().push(req.body.clone());
+                Ok(ProbeResponse { status: 200, body: b"ok".to_vec(), duration: Duration::from_millis(1) })
+            }
+        }
+
+        let order_probe = Arc::new(OrderRecordingProbe { seen: Mutex::new(Vec::new()) });
+        let order_clone = order_probe.clone();
+
+        let result = Fuzzer::new(order_probe)
+            .sql_injection()
+            .mode(FuzzMode::Table)
+            .target("http://x/", "POST")
+            .inject_body_raw()
+            .budget(5)
+            .run()
+            .await
+            .unwrap();
+
+        let seen = order_clone.seen.lock().unwrap();
+        // First 5 SQLI_PAYLOADS: "'", "\"", "' OR '1'='1", "\" OR \"1\"=\"1", "' OR 1=1--"
+        assert_eq!(seen.len(), 6, "should send exactly 5 payloads (budget + baseline)");
+        assert_eq!(seen[1], "'", "baseline + first payload should be exact table entry");
+        assert_eq!(seen[2], "\"", "second payload should be exact table entry");
+        assert_eq!(seen[3], "' OR '1'='1", "third payload should be exact table entry");
+        assert_eq!(seen[4], "\" OR \"1\"=\"1", "fourth payload should be exact table entry");
+        assert_eq!(seen[5], "' OR 1=1--", "fifth payload should be exact table entry");
+
+        assert_eq!(result.corpus_size, 0, "table mode should have no corpus");
+        assert_eq!(result.probes_sent, 5, "probes_sent should match budget");
+    }
+
+    /// InputsOnly mode sends user-supplied payloads exactly, in order.
+    #[tokio::test]
+    async fn inputs_only_sends_exact_user_inputs() {
+        use std::sync::Mutex;
+
+        struct RecProbe { seen: Mutex<Vec<String>> }
+        #[async_trait]
+        impl Probe for RecProbe {
+            async fn send(&self, req: &Request) -> Result<ProbeResponse, String> {
+                self.seen.lock().unwrap().push(req.body.clone());
+                Ok(ProbeResponse { status: 200, body: b"ok".to_vec(), duration: Duration::from_millis(1) })
+            }
+        }
+
+        let probe = Arc::new(RecProbe { seen: Mutex::new(Vec::new()) });
+        let probe_clone = probe.clone();
+
+        let result = Fuzzer::new(probe)
+            .sql_injection()
+            .mode(FuzzMode::InputsOnly)
+            .target("http://x/", "POST")
+            .inject_body_raw()
+            .seeds(["a", "b", "c", "d", "e"].iter().map(|s| s.to_string()))
+            .budget(3)
+            .run()
+            .await
+            .unwrap();
+
+        let seen = probe_clone.seen.lock().unwrap();
+        assert_eq!(seen.len(), 4, "baseline + budget 3 should send 3 payloads");
+        assert_eq!(&seen[1..], &["a", "b", "c"], "user payloads sent in order");
+
+        assert_eq!(result.corpus_size, 0, "inputs-only mode should have no corpus");
+        assert_eq!(result.probes_sent, 3);
+        // Provenance: all hits (none here) but interesting should have InputsOnly source
+        // With status 200, nothing is interesting. Just verify runs clean.
     }
 }

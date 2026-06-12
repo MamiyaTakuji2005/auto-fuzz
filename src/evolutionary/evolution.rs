@@ -218,7 +218,13 @@ impl<P: Probe> EvolutionaryLoop<P> {
     /// Setting `RngMode::ChaCha12` with a seed gives cross-platform replay.
     pub fn with_rng_mode(mut self, mode: RngMode) -> Self {
         self.rng_mode = mode;
-        self.havoc = self.havoc.with_rng_mode(mode);
+        if let Some(seed) = self.rng_seed {
+            self.havoc = self.havoc
+                .with_rng_mode(mode)
+                .with_seed(seed.wrapping_add(Self::HAVOC_SEED_OFFSET));
+        } else {
+            self.havoc = self.havoc.with_rng_mode(mode);
+        }
         self
     }
 
@@ -266,6 +272,7 @@ impl<P: Probe> EvolutionaryLoop<P> {
         let mut oversized_skipped   = 0usize;
         let mut mutation_noops      = 0usize;
         let mut tried: HashSet<u64> = HashSet::new();
+        let mut last_parent: Option<usize> = None;
 
         // Initial sync — seed the splice corpus once before the loop.
         self.havoc.update_corpus(self.corpus.all_payloads());
@@ -273,6 +280,11 @@ impl<P: Probe> EvolutionaryLoop<P> {
         while probes_sent < self.max_probes {
             // Power schedule: pick corpus entry weighted by energy.
             let Some(parent_idx) = self.corpus.schedule(&mut rng) else { break };
+            // Parent-scoped dedup: each parent explores its full neighbourhood.
+            if last_parent != Some(parent_idx) {
+                tried.clear();
+                last_parent = Some(parent_idx);
+            }
             let seed_payload = self.corpus.entry(parent_idx).unwrap().payload.clone();
 
             // Generation vs mutation decision — retry on no-op mutations.
