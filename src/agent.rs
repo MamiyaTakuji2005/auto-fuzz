@@ -627,3 +627,97 @@ impl<P: Probe> Fuzzer<P> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Mock probe that returns 500 + SQL error when payload contains ' OR.
+    struct MockSqlTarget;
+    #[async_trait]
+    impl Probe for MockSqlTarget {
+        async fn send(&self, req: &Request) -> Result<ProbeResponse, String> {
+            let p = req.url.split("?q=").nth(1).unwrap_or("");
+            if p.contains("' OR") || p.contains("' AND") || p.contains("UNION") {
+                Ok(ProbeResponse { status: 500, body: format!("SQL error near '{p}'").into_bytes(), duration: Duration::from_millis(2) })
+            } else {
+                Ok(ProbeResponse { status: 200, body: b"ok".to_vec(), duration: Duration::from_millis(1) })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn table_mode_zero_divergence() {
+        let probe = Arc::new(MockSqlTarget);
+
+        async fn run_one(probe: Arc<MockSqlTarget>) -> FuzzResult {
+            Fuzzer::new(probe)
+                .sql_injection()
+                .mode(FuzzMode::Table)
+                .target("http://x/?q=", "GET")
+                .inject_query("q")
+                .budget(68)
+                .replay_seed(42)
+                .stop_on_first_hit()
+                .run()
+                .await
+                .unwrap()
+        }
+
+        let r1 = run_one(probe.clone()).await;
+        let r2 = run_one(probe.clone()).await;
+
+        // Same number of hits
+        assert_eq!(r1.confirmed.len(), r2.confirmed.len(), "confirmed count diverged");
+        assert_eq!(r1.interesting.len(), r2.interesting.len(), "interesting count diverged");
+        assert_eq!(r1.probes_sent, r2.probes_sent, "probes_sent diverged");
+
+        // Same hits in same order
+        for (i, (h1, h2)) in r1.confirmed.iter().zip(r2.confirmed.iter()).enumerate() {
+            assert_eq!(h1.payload, h2.payload, "hit {i} payload diverged");
+            assert_eq!(h1.raw_score, h2.raw_score, "hit {i} raw_score diverged");
+            assert!((h1.confidence - h2.confidence).abs() < 0.001, "hit {i} confidence diverged");
+            assert_eq!(h1.signals, h2.signals, "hit {i} signals diverged");
+            // Provenance must be stable
+            match (&h1.source, &h2.source) {
+                (PayloadSource::Table { preset: p1, index: i1 }, PayloadSource::Table { preset: p2, index: i2 }) => {
+                    assert_eq!(p1, p2, "hit {i} source preset diverged");
+                    assert_eq!(i1, i2, "hit {i} source index diverged");
+                }
+                _ => panic!("hit {i} source type diverged"),
+            }
+        }
+
+        // Interesting list also matches (includes unconfirmed)
+        for (i, (h1, h2)) in r1.interesting.iter().zip(r2.interesting.iter()).enumerate() {
+            assert_eq!(h1.payload, h2.payload, "interesting[{i}] payload diverged");
+        }
+    }
+
+    #[tokio::test]
+    async fn table_mode_replay_matches_across_seeds() {
+        let probe = Arc::new(MockSqlTarget);
+
+        async fn run_one(probe: Arc<MockSqlTarget>, seed: u64) -> FuzzResult {
+            Fuzzer::new(probe)
+                .sql_injection()
+                .mode(FuzzMode::Table)
+                .target("http://x/?q=", "GET")
+                .inject_query("q")
+                .budget(30)
+                .replay_seed(seed)
+                .run()
+                .await
+                .unwrap()
+        }
+
+        let r1 = run_one(probe.clone(), 0).await;
+        let r2 = run_one(probe.clone(), 0).await;
+        assert_eq!(r1.confirmed.len(), r2.confirmed.len());
+
+        let r3 = run_one(probe.clone(), 1).await;
+        let r4 = run_one(probe.clone(), 1).await;
+        assert_eq!(r3.confirmed.len(), r4.confirmed.len());
+    }
+}
