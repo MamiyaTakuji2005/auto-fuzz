@@ -647,6 +647,30 @@ impl<P: Probe> Fuzzer<P> {
             });
         }
 
+        // ── TableThenEvolutionary: exact sweep then evolve ──
+        let mut extra_seeds: Vec<String> = Vec::new();
+        if matches!(self.mode, FuzzMode::TableThenEvolutionary) {
+            let table = self.preset.table.as_ref()
+                .ok_or_else(|| "TableThenEvolutionary requires a preset with a payload table".to_string())?;
+            let entries: Vec<String> = table.cases.iter().map(|c| c.payload.clone()).collect();
+            let signal_set = &self.preset.signal_set;
+            let feedback = &*self.preset.feedback;
+            let sweep_budget = self.budget.min(entries.len());
+            for payload in entries.into_iter().take(sweep_budget) {
+                let req = inject(&payload);
+                let resp = match tokio::time::timeout(self.request_timeout, probe.send(&req)).await {
+                    Ok(Ok(r)) => r,
+                    _ => continue,
+                };
+                let raw = signal_set.run(&payload, &baseline_resp, &resp);
+                let sigs = baseline_profile.filter(&raw);
+                let ctx = EvaluationContext { payload: &payload, request: &req, baseline: &baseline_resp, response: &resp, probe_error: None, raw_signals: &raw, filtered_signals: &sigs };
+                if feedback.evaluate(&ctx).interesting {
+                    extra_seeds.push(payload);
+                }
+            }
+        }
+
         // ── Evolutionary path (TableThenEvolutionary, Evolutionary) ──
         let sampler = WeightedSampler::new(
             self.preset.atoms,
@@ -657,6 +681,9 @@ impl<P: Probe> Fuzzer<P> {
         let havoc = HavocMutator::new(sampler.clone(), self.budget * 4);
         let mut corpus = SeedCorpus::from_seeds(&self.preset.seeds);
         for s in &self.additional_seeds {
+            corpus.push_seed(s.clone());
+        }
+        for s in &extra_seeds {
             corpus.push_seed(s.clone());
         }
 

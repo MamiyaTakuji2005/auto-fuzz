@@ -189,6 +189,10 @@ pub struct ReflectionClassifier;
 impl Classifier for ReflectionClassifier {
     fn classify(&self, payload: &str, baseline: &ProbeResponse, probe: &ProbeResponse) -> Option<Signal> {
         // Single chars like `"`, `'`, `<` appear in every HTML page — skip.
+        // Payloads shorter than 3 bytes are not checked for reflection.
+        // This suppresses single-char noise (e.g. "'", "<" appearing in benign
+        // JSON/HTML contexts), at the cost of missing short-but-real reflections.
+        // Trade-off: fewer false positives vs. blind spot for 1-2 char XSS probes.
         if payload.len() < 3 { return None; }
         let body = probe.body_text();
         let baseline_body = baseline.body_text();

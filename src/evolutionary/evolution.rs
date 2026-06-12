@@ -349,6 +349,24 @@ impl<P: Probe> EvolutionaryLoop<P> {
             };
             let eval = self.feedback.evaluate(&ctx);
 
+            // Timing re-probe: single-sample delays can be GC pauses.
+            // Re-probe once to filter out transient network noise.
+            let timing_confirmed = eval.confirmed && matches!(eval.best_signal, Signal::TimeDelay { .. });
+            let actually_confirmed = if timing_confirmed {
+                let req2 = inject(&candidate);
+                match tokio::time::timeout(self.request_timeout, self.probe.send(&req2)).await {
+                    Ok(Ok(resp2)) => {
+                        probes_sent += 1;
+                        let raw2 = self.signal_set.run(&candidate, &baseline, &resp2);
+                        let sigs2 = baseline_profile.filter(&raw2);
+                        sigs2.iter().any(|s| matches!(s, Signal::TimeDelay { .. }))
+                    }
+                    _ => false,
+                }
+            } else {
+                eval.confirmed
+            };
+
             // Corpus evolution — only filtered signals affect decisions.
             if eval.interesting {
                 let entry = CorpusEntry::discovered(candidate.clone(), eval.best_signal, eval.score, parent_idx);
@@ -374,14 +392,14 @@ impl<P: Probe> EvolutionaryLoop<P> {
                     ambient,
                     score: eval.score,
                     parent_idx,
-                    confirmed: eval.confirmed,
+                    confirmed: actually_confirmed,
                 };
-                if eval.confirmed {
+                if actually_confirmed {
                     hits.push(hit.clone());
                 }
                 interesting.push(hit);
 
-                if eval.confirmed && self.stop_on_confirmation {
+                if actually_confirmed && self.stop_on_confirmation {
                     break;
                 }
             }
