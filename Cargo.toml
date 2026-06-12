@@ -31,3 +31,9 @@ required-features = ["gui"]
 [features]
 default = []
 gui = ["dep:reqwest", "dep:egui", "dep:eframe"]
+
+[profile.release]
+opt-level = "z"     # optimize for size
+lto = true           # link-time optimization
+codegen-units = 1    # better LTO
+strip = true         # strip symbols
