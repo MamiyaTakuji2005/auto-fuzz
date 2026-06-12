@@ -3,6 +3,85 @@
 //! These are the "sweep the table first" seeds. The engine mutates from them,
 //! exploring the neighborhood of each proven payload rather than starting blind.
 
+/// Categories for payload classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadCategory {
+    Sqlinjection,
+    Xss,
+    Ssti,
+    CommandInjection,
+    PathTraversal,
+    Xxe,
+    NoSqli,
+    Ssrf,
+    Custom,
+}
+
+/// Risk level for gating execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PayloadRisk {
+    Safe,
+    Invasive,
+    Destructive,
+}
+
+/// A single payload with identity and metadata.
+#[derive(Debug, Clone)]
+pub struct PayloadCase {
+    pub id: String,
+    pub payload: String,
+    pub category: PayloadCategory,
+    pub risk: PayloadRisk,
+    pub tags: Vec<String>,
+}
+
+/// A named collection of payload cases.
+#[derive(Debug, Clone)]
+pub struct PayloadTable {
+    pub name: String,
+    pub cases: Vec<PayloadCase>,
+}
+
+impl PayloadTable {
+    /// Build from a legacy `&[&str]` table, assigning category, risk, and sequential IDs.
+    pub fn from_legacy(
+        name: &str,
+        category: PayloadCategory,
+        risk: PayloadRisk,
+        payloads: &[&str],
+    ) -> Self {
+        Self {
+            name: name.into(),
+            cases: payloads.iter().enumerate().map(|(i, p)| PayloadCase {
+                id: format!("{name}[{i}]"),
+                payload: p.to_string(),
+                category,
+                risk,
+                tags: vec![],
+            }).collect(),
+        }
+    }
+
+    pub fn payloads(&self) -> Vec<String> {
+        self.cases.iter().map(|c| c.payload.clone()).collect()
+    }
+
+    pub fn len(&self) -> usize { self.cases.len() }
+
+    pub fn is_empty(&self) -> bool { self.cases.is_empty() }
+}
+
+// ── Built-in tables (constructed from the legacy const arrays) ────────────
+
+pub fn sqli_table()    -> PayloadTable { PayloadTable::from_legacy("sqli",    PayloadCategory::Sqlinjection,     PayloadRisk::Invasive,   SQLI_PAYLOADS) }
+pub fn xss_table()     -> PayloadTable { PayloadTable::from_legacy("xss",     PayloadCategory::Xss,              PayloadRisk::Safe,       XSS_PAYLOADS) }
+pub fn ssti_table()    -> PayloadTable { PayloadTable::from_legacy("ssti",    PayloadCategory::Ssti,             PayloadRisk::Invasive,   SSTI_PAYLOADS) }
+pub fn cmd_table()     -> PayloadTable { PayloadTable::from_legacy("cmd",     PayloadCategory::CommandInjection, PayloadRisk::Destructive, CMD_PAYLOADS) }
+pub fn traversal_table()-> PayloadTable { PayloadTable::from_legacy("traversal", PayloadCategory::PathTraversal,  PayloadRisk::Safe,       PATH_TRAVERSAL_PAYLOADS) }
+pub fn xxe_table()     -> PayloadTable { PayloadTable::from_legacy("xxe",     PayloadCategory::Xxe,              PayloadRisk::Invasive,   XXE_PAYLOADS) }
+pub fn nosqli_table()  -> PayloadTable { PayloadTable::from_legacy("nosqli",  PayloadCategory::NoSqli,           PayloadRisk::Invasive,   NOSQLI_PAYLOADS) }
+pub fn ssrf_table()    -> PayloadTable { PayloadTable::from_legacy("ssrf",    PayloadCategory::Ssrf,             PayloadRisk::Safe,       SSRF_PAYLOADS) }
+
 /// Classic SQL injection probes — ordered roughly by detection power.
 ///
 /// Tier 1: error-triggering (fast, loud, confirmed)
