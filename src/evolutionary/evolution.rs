@@ -142,7 +142,7 @@ impl<P: Probe> EvolutionaryLoop<P> {
             feedback,
             sampler,
             havoc,
-            gen_ratio: 0.3,
+            gen_ratio: 0.7, // safe base default — presets override per-class
             max_probes: 50,
             request_timeout: std::time::Duration::from_secs(30),
             // Architecture intent: fuzzer = maximum recall. Caller opts in to

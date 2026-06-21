@@ -140,7 +140,7 @@ impl Default for Preset {
             seeds: vec![],
             signal_set: SignalSet::defaults(),
             feedback: Box::new(HttpFeedback::default()),
-            gen_ratio: 0.3,
+            gen_ratio: 0.7, // safe default — moderate generation
             placement: PlacementPolicy::default(),
             length: LengthPolicy::medium(),
         }
@@ -159,9 +159,9 @@ impl Preset {
                 .with(Box::new(ErrorClassifier::dbms_starter()))
                 .with(Box::new(TimeDelayClassifier::default())),
             feedback: Box::new(HttpFeedback::default()),
-            gen_ratio: 0.3,
+            gen_ratio: 0.8, // per-class: plateaus at 0.8 (944 hits/1k)
             placement: PlacementPolicy::default(),
-            length: LengthPolicy::medium(),
+            length: LengthPolicy::medium(), // SQLi not length-sensitive
         }
     }
 
@@ -173,7 +173,8 @@ impl Preset {
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(ReflectionClassifier))
                 .with(Box::new(BodyDiffClassifier)),
-            gen_ratio: 0.3,
+            gen_ratio: 0.8, // per-class: jumps at 0.8 (902 vs 824 at 0.7)
+            length: LengthPolicy::long(),  // XSS needs long chains to hit <script>
             ..Default::default()
         }
     }
@@ -187,7 +188,8 @@ impl Preset {
                 .with(Box::new(SizeClassifier::default()))
                 .with(Box::new(ReflectionClassifier))
                 .with(Box::new(ErrorClassifier::dbms_starter())),
-            gen_ratio: 0.3,
+            gen_ratio: 0.8, // per-class: peaks at 0.8 (964 hits/1k)
+            length: LengthPolicy::long(),  // long chains help template injection
             ..Default::default()
         }
     }
@@ -200,7 +202,8 @@ impl Preset {
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(TimeDelayClassifier::default()))
                 .with(Box::new(SizeClassifier::default())),
-            gen_ratio: 0.3,
+            gen_ratio: 0.7, // per-class: already hot at low gen (906 at 0.0), plateaus at 0.7 (951)
+            length: LengthPolicy::short(), // short chains sufficient — trigger is simple
             ..Default::default()
         }
     }
@@ -213,7 +216,8 @@ impl Preset {
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(SizeClassifier::default()))
                 .with(Box::new(ReflectionClassifier)),
-            gen_ratio: 0.3,
+            gen_ratio: 0.7, // similar profile to XSS, needs chain depth for ../ patterns
+            length: LengthPolicy::long(),
             ..Default::default()
         }
     }
@@ -227,8 +231,8 @@ impl Preset {
                 .with(Box::new(SizeClassifier::default()))
                 .with(Box::new(ErrorClassifier::dbms_starter()))
                 .with(Box::new(TimeDelayClassifier::default())),
-            gen_ratio: 0.3,
-            length: LengthPolicy::short(),
+            gen_ratio: 0.7, // similar to SQLi profile
+            length: LengthPolicy::short(), // NoSQL operators are compact
             ..Default::default()
         }
     }
@@ -241,7 +245,7 @@ impl Preset {
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(SizeClassifier::default()))
                 .with(Box::new(TimeDelayClassifier::default())),
-            gen_ratio: 0.0,
+            gen_ratio: 0.0, // pure havoc — generation doesn't help URL-based payloads
             ..Default::default()
         }
     }
@@ -254,7 +258,7 @@ impl Preset {
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(SizeClassifier::default()))
                 .with(Box::new(ReflectionClassifier)),
-            gen_ratio: 0.0,
+            gen_ratio: 0.0, // pure havoc — structured XML benefits from mutation not generation
             ..Default::default()
         }
     }

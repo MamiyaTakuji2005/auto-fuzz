@@ -28,6 +28,10 @@ name = "fuzz-gui"
 path = "src/bin/fuzz-gui.rs"
 required-features = ["gui"]
 
+[[bin]]
+name = "calibrate"
+path = "src/bin/calibrate.rs"
+
 [features]
 default = []
 gui = ["dep:reqwest", "dep:egui", "dep:eframe"]
