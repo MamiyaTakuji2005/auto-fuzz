@@ -14,6 +14,8 @@ tokio = { version = "1", features = ["time", "rt-multi-thread", "macros", "sync"
 async-trait = "0.1"
 regex = "1"
 url = "2"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
 
 # Optional: HTTP probing for fuzz-gui binary
 reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls"], optional = true }
@@ -31,6 +33,10 @@ required-features = ["gui"]
 [[bin]]
 name = "calibrate"
 path = "src/bin/calibrate.rs"
+
+[[bin]]
+name = "stress"
+path = "src/bin/stress.rs"
 
 [features]
 default = []

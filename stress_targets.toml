@@ -1,0 +1,169 @@
+[[targets]]
+name = "sqli"
+trigger_payload = "42'; DROP TABLE users--"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["42", "' OR"]
+trigger_status = 500
+trigger_body = "SQL error near '{{payload}}'"
+clean_delay_ms = 5
+trigger_delay_ms = 5
+
+[[targets]]
+name = "xss"
+trigger_payload = "<script>alert(1)</script>"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["<script>", "onerror=", "onload="]
+trigger_status = 200
+trigger_body = "<html>{{payload}}</html>"
+clean_delay_ms = 5
+trigger_delay_ms = 5
+
+[[targets]]
+name = "cmdi"
+trigger_payload = "; cat /etc/passwd"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = [";", "cat ", "ls "]
+trigger_status = 500
+trigger_body = "command execution error"
+clean_delay_ms = 5
+trigger_delay_ms = 25
+
+[[targets]]
+name = "ssti"
+trigger_payload = "{{7*7}}"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["{{", "7*7", "${"]
+trigger_status = 200
+trigger_body = "<html>result: {{payload}}</html>"
+clean_delay_ms = 5
+trigger_delay_ms = 5
+
+[[targets]]
+name = "sqli-strict"
+trigger_payload = "' OR '1'='1"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["OR ", "UNION", "--"]
+trigger_status = 500
+trigger_body = "You have an error in your SQL syntax"
+clean_delay_ms = 2
+trigger_delay_ms = 10
+
+[[targets]]
+name = "xss-reflected"
+trigger_payload = "<img src=x onerror=alert(1)>"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["<img", "onerror", "<svg", "onload"]
+trigger_status = 200
+trigger_body = "<div>{{payload}}</div>"
+clean_delay_ms = 3
+trigger_delay_ms = 3
+
+[[targets]]
+name = "ssrf"
+trigger_payload = "http://169.254.169.254/latest/meta-data/"
+baseline_url = "http://mock/?url=http://example.com"
+
+[targets.response]
+triggers = ["169.254", "metadata", "ami-id"]
+trigger_status = 200
+trigger_body = "ami-12345678"
+clean_delay_ms = 5
+trigger_delay_ms = 200
+
+[[targets]]
+name = "path-traversal"
+trigger_payload = "../../../../etc/passwd"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["../", "etc/passwd", "%2e%2e"]
+trigger_status = 200
+trigger_body = "root:x:0:0:root:/root:/bin/bash"
+clean_delay_ms = 5
+trigger_delay_ms = 5
+
+[[targets]]
+name = "waf-blocked"
+trigger_payload = "' OR '1'='1"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["__NEVER_MATCH__"]
+trigger_status = 403
+trigger_body = "Forbidden"
+clean_status = 403
+clean_body = "Forbidden"
+clean_delay_ms = 1
+trigger_delay_ms = 1
+
+[[targets]]
+name = "ssrf-blind"
+trigger_payload = "http://169.254.169.254/latest/meta-data/"
+baseline_url = "http://mock/?url=http://example.com"
+
+[targets.response]
+triggers = ["__NEVER_MATCH__"]
+trigger_status = 200
+trigger_body = "ok"
+clean_delay_ms = 5
+trigger_delay_ms = 200
+
+[[targets]]
+name = "xss-case-folding"
+trigger_payload = "<IMG SRC=x oNeRrOr=alert(1)>"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["<img", "onerror", "onload", "<svg", "onload"]
+trigger_status = 200
+trigger_body = "<div>{{payload}}</div>"
+clean_delay_ms = 3
+trigger_delay_ms = 3
+
+[[targets]]
+name = "500-state-error"
+trigger_payload = "'; DROP TABLE users--"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["'"]
+trigger_status = 500
+trigger_body = "unusual application state"
+clean_delay_ms = 5
+trigger_delay_ms = 5
+
+[[targets]]
+name = "ssrf-internal-url"
+trigger_payload = "http://169.254.169.254/latest/meta-data/"
+baseline_url = "http://mock/?url=http://example.com"
+
+[targets.response]
+triggers = ["169.254", "metadata", "ami-id"]
+trigger_status = 200
+trigger_body = "status: ok, fetched: http://169.254.169.254/internal-api/v2/users, internal_url: http://169.254.169.254/internal-api/v2/users, ssrf_confirmed = true"
+clean_delay_ms = 5
+trigger_delay_ms = 200
+
+[[targets]]
+name = "xss-multi"
+trigger_payload = "<img src=x onerror=alert(1)>"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["<img", "onerror", "<svg", "onload"]
+trigger_status = 200
+trigger_body = "<div>{{payload}}</div>"
+clean_delay_ms = 5
+trigger_delay_ms = 3

@@ -1,24 +1,20 @@
-//! Calibration harness — big-batch sweep across each dimension in isolation,
-//! producing per-target response curves that can be graphed.
-//!
-//! Three phases per vulnerability class:
-//!   Phase 1: gen_ratio sweep   [0.0 .. 1.0 in 0.1 steps]  × 5 trials
-//!   Phase 2: LengthPolicy sweep [short, medium, long]      × 5 trials
-//!   Phase 3: Havoc schedule sweep [4 presets]              × 5 trials
+//! Calibration harness — config-driven mock targets, sweep across parameters.
 //!
 //! Run with:
 //!     cargo run --bin calibrate --release
-//!     python stuff/plot_calibration.py calibration_results.csv
+//!     cargo run --bin calibrate --release -- targets.toml
 //!
-//! Each row carries a `sweep_axis` column so the plotter can split by dimension.
+//! Reads mock target definitions from a TOML file (defaults to targets.toml).
+//! Each target defines trigger conditions and simulated responses.
+//! Optionally override the atom vocabulary via a top-level `atoms` key.
+//! No more hardcoded structs — add a new target by editing the TOML.
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use async_trait::async_trait;
+use std::time::Instant;
 
 use auto_fuzz::evolutionary::{
     ChainTable, EvolutionaryLoop, HavocMutator, HttpFeedback, LengthPolicy,
@@ -27,98 +23,15 @@ use auto_fuzz::evolutionary::{
 use auto_fuzz::evolutionary::atoms::ATOMS;
 use auto_fuzz::evolutionary::havoc::HavocSchedule;
 
+use auto_fuzz::mock_config::{load_config, ConfigProbe, MockTarget};
 use auto_fuzz::signals::signal::{
-    ErrorClassifier, ProbeResponse, ReflectionClassifier, StatusClassifier, TimeDelayClassifier,
+    ErrorClassifier, ReflectionClassifier, StatusClassifier, TimeDelayClassifier,
 };
-use auto_fuzz::signals::{Probe, Request, SignalSet};
+use auto_fuzz::signals::{Request, SignalSet};
 
-const MAX_PROBES: usize = 300;
-const TRIALS: u32 = 5;
+const DEFAULT_MAX_PROBES: usize = 300;
+const DEFAULT_TRIALS: u32 = 5;
 const BASE_SEED: u64 = 42;
-
-// ── Mock Targets ───────────────────────────────────────────────────────────
-
-// ── Mock Targets ───────────────────────────────────────────────────────────
-
-struct SqlInjectionTarget;
-impl SqlInjectionTarget {
-    fn name() -> &'static str { "sqli" }
-    fn baseline_req() -> Request {
-        Request { url: "http://mock/?q=1".into(), method: "GET".into(),
-                  headers: HashMap::new(), body: String::new() }
-    }
-    fn trigger_payload() -> &'static str { "42'; DROP TABLE users--" }
-}
-#[async_trait]
-impl Probe for SqlInjectionTarget {
-    async fn send(&self, req: &Request) -> Result<ProbeResponse, String> {
-        let p = req.url.split("?q=").nth(1).unwrap_or("");
-        let (s, b, d) = if p.contains("42") || p.contains("' OR") {
-            (500u16, format!("SQL error near '{}'", p).into_bytes(), 5u64)
-        } else { (200u16, b"ok".to_vec(), 5u64) };
-        Ok(ProbeResponse { status: s, body: b, duration: Duration::from_millis(d) })
-    }
-}
-
-struct XssTarget;
-impl XssTarget {
-    fn name() -> &'static str { "xss" }
-    fn baseline_req() -> Request {
-        Request { url: "http://mock/?q=1".into(), method: "GET".into(),
-                  headers: HashMap::new(), body: String::new() }
-    }
-    fn trigger_payload() -> &'static str { "<script>alert(1)</script>" }
-}
-#[async_trait]
-impl Probe for XssTarget {
-    async fn send(&self, req: &Request) -> Result<ProbeResponse, String> {
-        let p = req.url.split("?q=").nth(1).unwrap_or("");
-        let (s, b, d) = if p.contains("<script>") {
-            (200u16, format!("<html>{}</html>", p).into_bytes(), 5u64)
-        } else { (200u16, b"ok".to_vec(), 5u64) };
-        Ok(ProbeResponse { status: s, body: b, duration: Duration::from_millis(d) })
-    }
-}
-
-struct CmdiTarget;
-impl CmdiTarget {
-    fn name() -> &'static str { "cmdi" }
-    fn baseline_req() -> Request {
-        Request { url: "http://mock/?q=1".into(), method: "GET".into(),
-                  headers: HashMap::new(), body: String::new() }
-    }
-    fn trigger_payload() -> &'static str { "; cat /etc/passwd" }
-}
-#[async_trait]
-impl Probe for CmdiTarget {
-    async fn send(&self, req: &Request) -> Result<ProbeResponse, String> {
-        let p = req.url.split("?q=").nth(1).unwrap_or("");
-        let (s, b, d) = if p.contains(';') || p.contains("cat ") {
-            (500u16, b"command execution error".to_vec(), 25u64)
-        } else { (200u16, b"ok".to_vec(), 5u64) };
-        Ok(ProbeResponse { status: s, body: b, duration: Duration::from_millis(d) })
-    }
-}
-
-struct SstiTarget;
-impl SstiTarget {
-    fn name() -> &'static str { "ssti" }
-    fn baseline_req() -> Request {
-        Request { url: "http://mock/?q=1".into(), method: "GET".into(),
-                  headers: HashMap::new(), body: String::new() }
-    }
-    fn trigger_payload() -> &'static str { "{{7*7}}" }
-}
-#[async_trait]
-impl Probe for SstiTarget {
-    async fn send(&self, req: &Request) -> Result<ProbeResponse, String> {
-        let p = req.url.split("?q=").nth(1).unwrap_or("");
-        let (s, b, d) = if p.contains("{{") || p.contains("7*7") {
-            (200u16, format!("<html>result: {}</html>", p).into_bytes(), 5u64)
-        } else { (200u16, b"ok".to_vec(), 5u64) };
-        Ok(ProbeResponse { status: s, body: b, duration: Duration::from_millis(d) })
-    }
-}
 
 // ── Havoc schedule presets ───────────────────────────────────────────────
 
@@ -153,9 +66,7 @@ fn encoding_schedule() -> HavocSchedule {
 
 #[derive(Clone)]
 struct CalibConfig {
-    /// Human label for this config row (e.g. "gen=0.7").
     label: String,
-    /// Which sweep dimension this row belongs to ("gen_ratio", "length", "havoc").
     sweep_axis: &'static str,
     gen_ratio: f32,
     length_policy: LengthPolicy,
@@ -170,7 +81,7 @@ impl CalibConfig {
         Self {
             label: label.to_string(), sweep_axis: axis,
             gen_ratio, length_policy: length,
-            havoc_ops: 4, havoc_schedule: schedule, max_probes: MAX_PROBES,
+            havoc_ops: 4, havoc_schedule: schedule, max_probes: DEFAULT_MAX_PROBES,
         }
     }
 }
@@ -186,19 +97,17 @@ struct RunMetrics {
     hits_per_1000: f64,
 }
 
-async fn run_one<T: Probe + 'static>(
-    probe: Arc<T>,
-    trigger: &str,
-    baseline_req: &Request,
+async fn run_one(
+    probe: Arc<ConfigProbe>,
+    atoms: &[String],
     config: &CalibConfig,
     trial: u32,
 ) -> RunMetrics {
     let start = Instant::now();
 
-    let corpus = SeedCorpus::from_seeds(vec![trigger.to_string()]);
-    let atoms: Vec<String> = ATOMS.iter().map(|s| s.to_string()).collect();
+    let corpus = SeedCorpus::from_seeds(vec![probe.target.trigger_payload.clone()]);
     let sampler = WeightedSampler::new(
-        atoms,
+        atoms.to_vec(),
         ChainTable::defaults(),
         PlacementPolicy::default(),
         config.length_policy.clone(),
@@ -217,7 +126,7 @@ async fn run_one<T: Probe + 'static>(
         .with(Box::new(TimeDelayClassifier::default()));
 
     let loop_ = EvolutionaryLoop::new(
-        probe, corpus, sampler, havoc,
+        probe.clone(), corpus, sampler, havoc,
         Box::new(HttpFeedback::default()),
     )
     .with_gen_ratio(config.gen_ratio)
@@ -225,9 +134,14 @@ async fn run_one<T: Probe + 'static>(
     .with_seed(BASE_SEED + trial as u64)
     .with_signal_set(signal_set);
 
-    let baseline_req = baseline_req.clone();
+    let baseline_req = Request {
+        url: probe.target.baseline_url.clone(),
+        method: probe.target.baseline_method.clone(),
+        headers: HashMap::new(),
+        body: String::new(),
+    };
     let inject = |p: &str| Request {
-        url: format!("http://mock/?q={}", p),
+        url: format!("{}?q={}", probe.target.baseline_url.split('?').next().unwrap_or(&probe.target.baseline_url), p),
         method: "GET".into(),
         headers: HashMap::new(),
         body: String::new(),
@@ -256,12 +170,13 @@ async fn run_one<T: Probe + 'static>(
 
 // ── Batch runner — sweeps one target through all 3 phases ─────────────────
 
-async fn batch_target<T: Probe + 'static>(
-    probe: Arc<T>,
-    name: &str,
-    trigger: &str,
-    baseline_req: &Request,
+async fn batch_target(
+    target: MockTarget,
+    atoms: &[String],
+    trials: u32,
 ) -> Vec<(String, String, String, u32, RunMetrics)> {
+    let name = target.name.clone();
+    let probe = Arc::new(ConfigProbe::new(target));
     let mut rows = Vec::new();
 
     // ── Phase 1: gen_ratio sweep ────────────────────────────────────────
@@ -270,23 +185,23 @@ async fn batch_target<T: Probe + 'static>(
     for &g in gr {
         let cfg = CalibConfig::new("gen_ratio", &format!("gen={:.1}", g),
                                     g, LengthPolicy::medium(), None);
-        for trial in 0..TRIALS {
-            let m = run_one(probe.clone(), trigger, baseline_req, &cfg, trial).await;
-            rows.push((name.to_string(), cfg.label.clone(), cfg.sweep_axis.to_string(), trial, m));
+        for trial in 0..trials {
+            let m = run_one(probe.clone(), atoms, &cfg, trial).await;
+            rows.push((name.clone(), cfg.label.clone(), cfg.sweep_axis.to_string(), trial, m));
             print!(".");
         }
     }
-    println!(" {}", gr.len() * TRIALS as usize);
+    println!(" {}", gr.len() * trials as usize);
 
     // ── Phase 2: LengthPolicy sweep at best gen_ratio ───────────────────
-    let best_gr = 0.7; // pre-calibrated; you can compute from Phase 1 data
+    let best_gr = 0.7;
     println!("  {} length [short, medium, long] @ gen={:.1}", name, best_gr);
     for (tag, lp) in &[("short", LengthPolicy::short()), ("medium", LengthPolicy::medium()), ("long", LengthPolicy::long())] {
         let cfg = CalibConfig::new("length", &format!("len={}", tag),
                                     best_gr, lp.clone(), None);
-        for trial in 0..TRIALS {
-            let m = run_one(probe.clone(), trigger, baseline_req, &cfg, trial).await;
-            rows.push((name.to_string(), cfg.label.clone(), cfg.sweep_axis.to_string(), trial, m));
+        for trial in 0..trials {
+            let m = run_one(probe.clone(), atoms, &cfg, trial).await;
+            rows.push((name.clone(), cfg.label.clone(), cfg.sweep_axis.to_string(), trial, m));
             print!(".");
         }
     }
@@ -302,9 +217,9 @@ async fn batch_target<T: Probe + 'static>(
     ] {
         let cfg = CalibConfig::new("havoc", &format!("havoc={}", tag),
                                     best_gr, LengthPolicy::medium(), sched.clone());
-        for trial in 0..TRIALS {
-            let m = run_one(probe.clone(), trigger, baseline_req, &cfg, trial).await;
-            rows.push((name.to_string(), cfg.label.clone(), cfg.sweep_axis.to_string(), trial, m));
+        for trial in 0..trials {
+            let m = run_one(probe.clone(), atoms, &cfg, trial).await;
+            rows.push((name.clone(), cfg.label.clone(), cfg.sweep_axis.to_string(), trial, m));
             print!(".");
         }
     }
@@ -317,44 +232,56 @@ async fn batch_target<T: Probe + 'static>(
 
 #[tokio::main]
 async fn main() {
-    println!("auto-fuzz Calibration Harness — Big Batch Sweep");
-    println!("================================================\n");
-    println!("Phases per target: gen_ratio × length × havoc");
-    println!("{} probes/run, {} trials/point\n", MAX_PROBES, TRIALS);
+    let args: Vec<String> = std::env::args().collect();
+    let config_path = args.get(1)
+        .map(|s| PathBuf::from(s))
+        .unwrap_or_else(|| PathBuf::from("targets.toml"));
+
+    let config = match load_config(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error loading config: {}", e);
+            eprintln!("Usage: cargo run --bin calibrate -- [targets.toml]");
+            std::process::exit(1);
+        }
+    };
+
+    let targets = config.targets;
+    if targets.is_empty() {
+        eprintln!("No targets defined in {}", config_path.display());
+        std::process::exit(1);
+    }
+
+    // Atom vocabulary: config override or built-in ATOMS
+    let atoms: Vec<String> = match config.atoms {
+        Some(custom) => {
+            println!("Using custom atom vocabulary ({} atoms)", custom.len());
+            custom
+        }
+        None => {
+            let a: Vec<String> = ATOMS.iter().map(|s| s.to_string()).collect();
+            println!("Using built-in ATOMS vocabulary ({} atoms)", a.len());
+            a
+        }
+    };
+
+    println!("\nauto-fuzz Calibration Harness");
+    println!("=============================");
+    println!("Config: {}", config_path.display());
+    println!("Targets: {}\n", targets.len());
 
     let mut results: Vec<(String, String, String, u32, RunMetrics)> = Vec::new();
 
-    {
-        let p = Arc::new(SqlInjectionTarget);
-        let bl = SqlInjectionTarget::baseline_req();
-        results.extend(
-            batch_target(p, SqlInjectionTarget::name(),
-                         SqlInjectionTarget::trigger_payload(), &bl).await);
-    }
-    {
-        let p = Arc::new(XssTarget);
-        let bl = XssTarget::baseline_req();
-        results.extend(
-            batch_target(p, XssTarget::name(),
-                         XssTarget::trigger_payload(), &bl).await);
-    }
-    {
-        let p = Arc::new(CmdiTarget);
-        let bl = CmdiTarget::baseline_req();
-        results.extend(
-            batch_target(p, CmdiTarget::name(),
-                         CmdiTarget::trigger_payload(), &bl).await);
-    }
-    {
-        let p = Arc::new(SstiTarget);
-        let bl = SstiTarget::baseline_req();
-        results.extend(
-            batch_target(p, SstiTarget::name(),
-                         SstiTarget::trigger_payload(), &bl).await);
+    for target in &targets {
+        println!("Target: {} (trigger: \"{}\")", target.name, target.trigger_payload);
+        let batch = batch_target(target.clone(), &atoms, DEFAULT_TRIALS).await;
+        results.extend(batch);
+        println!();
     }
 
     // ── Write CSV ──────────────────────────────────────────────────────────
-    let mut f = File::create("calibration_results.csv").unwrap();
+    let csv_path = config_path.with_extension("").with_file_name("calibration_results.csv");
+    let mut f = File::create(&csv_path).unwrap();
     writeln!(f, "vuln_class,sweep_axis,config,trial,time_to_first_hit_ms,hits,probes_sent,final_corpus,hits_per_1000")
         .unwrap();
 
@@ -366,8 +293,7 @@ async fn main() {
     }
 
     let total = results.len();
-    println!("\nDone — {} data points written to calibration_results.csv", total);
-    println!("Run: python stuff/plot_calibration.py calibration_results.csv");
+    println!("Done — {} data points written to {}", total, csv_path.display());
 
     // ── Quick per-axis summary ─────────────────────────────────────────────
     for axis in &["gen_ratio", "length", "havoc"] {

@@ -28,8 +28,26 @@ Three modes: evolutionary (generate + mutate from scratch), table (sweep a fixed
 
 ```bash
 cargo run --example report --release   # benchmarks
-cargo run --bin calibrate --release    # parameter sweep across mock targets
+cargo run --bin calibrate --release    # parameter sweep from targets.toml
 ```
+
+### Calibration
+
+Edit `targets.toml` to define mock targets — each entry specifies trigger conditions and simulated responses:
+
+```toml
+[[targets]]
+name = "sqli"
+trigger_payload = "42'; DROP TABLE users--"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["42", "' OR"]
+trigger_status = 500
+trigger_body = "SQL error near '{{payload}}'"
+```
+
+Add a new target by copying a block. No Rust changes needed.
 
 ## License
 

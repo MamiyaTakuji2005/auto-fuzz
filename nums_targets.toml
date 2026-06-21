@@ -1,0 +1,97 @@
+# Distribution testing config — atoms are digits 0-9, targets are digit patterns.
+#
+# Run: cargo run --bin calibrate --release -- nums_targets.toml
+#
+# This makes the atom distribution visible in the results:
+#   - digit-3: single atom hit — how fast does the engine find "3"?
+#   - pair-42: two-atom chain — does the ChainTable learn "4" -> "2"?
+#   - triple-137: three-atom chain — longer chain discovery
+#   - dead-end: no signal at all — how does the engine handle zero-signal?
+
+atoms = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+
+[[targets]]
+name = "digit-3"
+trigger_payload = "3"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["3"]
+trigger_status = 500
+trigger_body = "error near '{{payload}}'"
+clean_delay_ms = 1
+trigger_delay_ms = 1
+
+[[targets]]
+name = "digit-7"
+trigger_payload = "7"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["7"]
+trigger_status = 500
+trigger_body = "error near '{{payload}}'"
+clean_delay_ms = 1
+trigger_delay_ms = 1
+
+[[targets]]
+name = "pair-42"
+trigger_payload = "42"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["42"]
+trigger_status = 500
+trigger_body = "error near '{{payload}}'"
+clean_delay_ms = 1
+trigger_delay_ms = 1
+
+[[targets]]
+name = "triple-137"
+trigger_payload = "137"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["137"]
+trigger_status = 500
+trigger_body = "error near '{{payload}}'"
+clean_delay_ms = 1
+trigger_delay_ms = 1
+
+[[targets]]
+name = "digit-0"
+trigger_payload = "0"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["0"]
+trigger_status = 500
+trigger_body = "error near '{{payload}}'"
+clean_delay_ms = 1
+trigger_delay_ms = 1
+
+[[targets]]
+name = "pair-90"
+trigger_payload = "90"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["90"]
+trigger_status = 500
+trigger_body = "error near '{{payload}}'"
+clean_delay_ms = 1
+trigger_delay_ms = 1
+
+[[targets]]
+name = "dead-end"
+trigger_payload = "999"
+baseline_url = "http://mock/?q=1"
+
+[targets.response]
+triggers = ["__NEVER_MATCH__"]
+trigger_status = 403
+trigger_body = "Forbidden"
+clean_status = 403
+clean_body = "Forbidden"
+clean_delay_ms = 1
+trigger_delay_ms = 1
