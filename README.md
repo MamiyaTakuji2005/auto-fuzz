@@ -49,6 +49,10 @@ trigger_body = "SQL error near '{{payload}}'"
 
 Add a new target by copying a block. No Rust changes needed.
 
+Run: `cargo run --bin calibrate --release -- targets.toml`
+
+Full calibration notes at `stuff/README.md`.
+
 ## License
 
 MIT
