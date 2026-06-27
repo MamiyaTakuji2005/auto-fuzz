@@ -57,6 +57,47 @@ impl CorpusEntry {
     }
 }
 
+// ── BoostPolicy ─────────────────────────────────────────────────────────────
+
+/// How parent energy grows when a child discovers something interesting.
+/// This is the core explore/exploit dial — it determines how aggressively
+/// the scheduler concentrates on signal-rich lineages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoostMode {
+    /// No boost — parent energy stays at its initial value. Pure exploration:
+    /// every entry is equally likely regardless of how many hits it produced.
+    None,
+    /// Additive: `energy += score` (current default behavior). Linear growth.
+    Additive,
+    /// Flat: `energy += 1` regardless of signal strength. All interesting
+    /// children boost the parent equally.
+    Flat,
+    /// Multiplicative: `energy = energy * (6 + score) / 6`. Faster growth for
+    /// high-score signals, slower for low-score ones. Exponential exploitation.
+    Multiplicative,
+}
+
+impl Default for BoostMode {
+    fn default() -> Self { Self::Additive }
+}
+
+impl BoostMode {
+    /// Compute the new energy given the old energy, the signal score, and cap.
+    fn apply(self, old_energy: u8, score: u8, cap: u8) -> u8 {
+        match self {
+            BoostMode::None => old_energy,
+            BoostMode::Additive => old_energy.saturating_add(score).min(cap),
+            BoostMode::Flat => old_energy.saturating_add(1).min(cap),
+            BoostMode::Multiplicative => {
+                // energy * (6 + score) / 6 — grows ~1x to ~2x per boost
+                let factor = (6 + score.min(6)) as u16;
+                let scaled = (old_energy as u16 * factor) / 6;
+                scaled.min(cap as u16) as u8
+            }
+        }
+    }
+}
+
 // ── SeedCorpus ────────────────────────────────────────────────────────────────
 
 /// The living corpus. Starts with seeds; grows as the evolutionary loop finds
@@ -71,6 +112,10 @@ pub struct SeedCorpus {
     buckets: [Vec<usize>; 65],
     /// Precomputed per-bucket weight = bucket.len() * energy.
     bucket_weights: [u32; 65],
+    /// How parent energy grows on interesting children.
+    pub boost_mode: BoostMode,
+    /// Maximum energy any entry can reach. Default 64.
+    pub max_energy: u8,
 }
 
 impl SeedCorpus {
@@ -81,7 +126,21 @@ impl SeedCorpus {
             index_by_payload: HashMap::new(),
             buckets: [(); 65].map(|_| Vec::new()),
             bucket_weights: [0; 65],
+            boost_mode: BoostMode::default(),
+            max_energy: 64,
         }
+    }
+
+    /// Set the boost mode (how parent energy grows on interesting children).
+    pub fn with_boost_mode(mut self, mode: BoostMode) -> Self {
+        self.boost_mode = mode;
+        self
+    }
+
+    /// Set the maximum energy cap.
+    pub fn with_max_energy(mut self, cap: u8) -> Self {
+        self.max_energy = cap.min(64);
+        self
     }
 
     /// Build from a list of seed strings. All get base energy = 1.
@@ -163,7 +222,7 @@ impl SeedCorpus {
         let (old, new) = {
             if let Some(e) = self.entries.get_mut(idx) {
                 let old = e.energy;
-                e.energy = e.energy.saturating_add(by).min(64);
+                e.energy = self.boost_mode.apply(old, by, self.max_energy);
                 (old, e.energy)
             } else {
                 return;
