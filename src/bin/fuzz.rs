@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use auto_fuzz::agent::{FuzzMode, FuzzResult, Fuzzer, Hit};
-use auto_fuzz::http::HttpProbe;
+use auto_fuzz::http::{CsrfConfig, HttpProbe};
 
 struct Args {
     preset: String,
@@ -27,6 +27,10 @@ struct Args {
     hunt: bool,
     /// Static headers merged into every request (`Name: Value`), plus `--cookie`.
     headers: Vec<(String, String)>,
+    /// CSRF token refresh: GET this URL before each probe to pull a fresh token.
+    csrf_url: Option<String>,
+    csrf_field: String,
+    csrf_regex: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -40,6 +44,9 @@ fn parse_args() -> Result<Args, String> {
     let mut mode = FuzzMode::Evolutionary;
     let mut hunt = false;
     let mut headers: Vec<(String, String)> = Vec::new();
+    let mut csrf_url = None;
+    let mut csrf_field = "user_token".to_string();
+    let mut csrf_regex = None;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -74,6 +81,9 @@ fn parse_args() -> Result<Args, String> {
                 headers.push((name.trim().to_string(), value.trim().to_string()));
             }
             "--cookie" => headers.push(("Cookie".to_string(), take_val(&mut i)?)),
+            "--csrf-url" => csrf_url = Some(take_val(&mut i)?),
+            "--csrf-field" => csrf_field = take_val(&mut i)?,
+            "--csrf-regex" => csrf_regex = Some(take_val(&mut i)?),
             "--hunt" => hunt = true,
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown flag: {other}")),
@@ -92,6 +102,9 @@ fn parse_args() -> Result<Args, String> {
         mode,
         hunt,
         headers,
+        csrf_url,
+        csrf_field,
+        csrf_regex,
     })
 }
 
@@ -162,6 +175,7 @@ async fn main() {
             eprintln!("            [--inject-query <param> | --inject-body '<tmpl with {{{{payload}}}}>'] \\");
             eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary] [--hunt]");
             eprintln!("            [--header 'Name: Value']... [--cookie 'a=b; c=d']");
+            eprintln!("            [--csrf-url <URL> [--csrf-field user_token] [--csrf-regex <pat with group 1>]]");
             std::process::exit(if e == "help" { 0 } else { 2 });
         }
     };
@@ -201,7 +215,24 @@ async fn main() {
     }
     println!("budget:    {} probes   timeout: {}s", args.budget, args.timeout_secs);
 
-    let probe = Arc::new(HttpProbe::new(Duration::from_secs(args.timeout_secs)));
+    let timeout = Duration::from_secs(args.timeout_secs);
+    let probe = match &args.csrf_url {
+        Some(url) => {
+            // Default regex pulls the token out of `name='FIELD' ... value='TOKEN'`.
+            let pat = args.csrf_regex.clone().unwrap_or_else(|| {
+                format!(r#"{}['"][^>]*?value=['"]([^'"]+)"#, regex::escape(&args.csrf_field))
+            });
+            let regex = match regex::Regex::new(&pat) {
+                Ok(r) => r,
+                Err(e) => { eprintln!("error: bad --csrf-regex: {e}"); std::process::exit(2); }
+            };
+            println!("csrf:      GET {url}  field `{}`", args.csrf_field);
+            Arc::new(HttpProbe::with_csrf(timeout, CsrfConfig {
+                url: url.clone(), field: args.csrf_field.clone(), regex,
+            }))
+        }
+        None => Arc::new(HttpProbe::new(timeout)),
+    };
     let mut f = Fuzzer::new(probe).target(&base_url, &args.method);
     f = match apply_preset(f, &args.preset) {
         Ok(f) => f,
