@@ -53,6 +53,16 @@ pub enum Signal {
         /// The matched substring.
         snippet: String,
     },
+    /// A known dangerous-content signature appeared in the body that was NOT in
+    /// the baseline — e.g. leaked file bytes (`root:x:0:0`) or cloud metadata
+    /// (`AccessKeyId`). Direct evidence of a successful file read / SSRF, so it
+    /// confirms a hit on its own (unlike the deliberately-noisy `SizeDelta`).
+    LeakSignature {
+        /// Which signature family matched (e.g. "unix_passwd", "aws_credentials").
+        label: String,
+        /// The matched substring.
+        snippet: String,
+    },
     /// Probe duration crossed the time-based threshold.
     TimeDelay {
         baseline_ms: u128,
@@ -88,6 +98,7 @@ impl Signal {
             },
             Signal::Reflected { .. } => "reflected",
             Signal::Error { .. } => "error",
+            Signal::LeakSignature { .. } => "leak_signature",
             Signal::TimeDelay { .. } => "time_delay",
             Signal::BodyDiff => "body_diff",
         }
@@ -341,12 +352,99 @@ impl Classifier for ErrorClassifier {
     }
 }
 
+/// Literal-substring match against a library of "leak signatures" — content
+/// that only appears when an injection actually succeeded (leaked file bytes,
+/// cloud metadata, etc.). Unlike [`ErrorClassifier`] (DBMS error regexes),
+/// these are per-vulnerability-class and confirm a hit directly.
+///
+/// Only fires when the signature is in the probe body but NOT the baseline, so
+/// content the target always serves is never mistaken for a fresh leak.
+pub struct BodySignatureClassifier {
+    /// `(label, needle)` pairs; the needle is matched as a literal substring.
+    signatures: Vec<(String, String)>,
+}
+
+impl BodySignatureClassifier {
+    /// Build from labelled `(label, needle)` pairs.
+    pub fn new(entries: &[(&str, &str)]) -> Self {
+        let signatures = entries
+            .iter()
+            .map(|(label, needle)| (label.to_string(), needle.to_string()))
+            .collect();
+        Self { signatures }
+    }
+
+    /// Build from bare needles, using each needle as its own label. Handy when
+    /// signatures come from config (e.g. a mock target's `confirm_signatures`).
+    pub fn from_needles<I, S>(needles: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let signatures = needles
+            .into_iter()
+            .map(|n| (n.as_ref().to_string(), n.as_ref().to_string()))
+            .collect();
+        Self { signatures }
+    }
+
+    /// File-read / path-traversal leak signatures (unix + windows).
+    pub fn file_read() -> Self {
+        Self::new(&[
+            ("unix_passwd", "root:x:0:0"),
+            ("win_ini",     "[extensions]"),
+            ("win_boot",    "[boot loader]"),
+        ])
+    }
+
+    /// SSRF / cloud-metadata leak signatures.
+    pub fn cloud_metadata() -> Self {
+        Self::new(&[
+            ("aws_credentials", "AccessKeyId"),
+            ("aws_ami",         "ami-id"),
+            ("gcp_metadata",    "Metadata-Flavor"),
+        ])
+    }
+}
+
+impl Classifier for BodySignatureClassifier {
+    fn classify(&self, _payload: &str, baseline: &ProbeResponse, probe: &ProbeResponse) -> Option<Signal> {
+        let body = probe.body_text();
+        let baseline_body = baseline.body_text();
+        for (label, needle) in &self.signatures {
+            if body.contains(needle.as_str()) && !baseline_body.contains(needle.as_str()) {
+                return Some(Signal::LeakSignature {
+                    label: label.clone(),
+                    snippet: needle.clone(),
+                });
+            }
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn resp(status: u16, body: &str, ms: u64) -> ProbeResponse {
         ProbeResponse { status, body: body.as_bytes().to_vec(), duration: Duration::from_millis(ms) }
+    }
+
+    #[test]
+    fn body_signature_confirms_leak_but_not_ambient() {
+        let c = BodySignatureClassifier::file_read();
+        let clean = resp(200, "ok", 5);
+        // Leaked passwd content the baseline never showed → signal.
+        let leak = resp(200, "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:", 5);
+        assert!(matches!(
+            c.classify("../etc/passwd", &clean, &leak),
+            Some(Signal::LeakSignature { .. })
+        ));
+        // Same content already in baseline → ambient, not a fresh leak.
+        assert!(c.classify("../etc/passwd", &leak, &leak).is_none());
+        // Body without any signature → nothing.
+        assert!(c.classify("../etc/passwd", &clean, &resp(200, "not found", 5)).is_none());
     }
 
     #[test]

@@ -32,7 +32,7 @@ atoms → WeightedSampler (ChainTable) → HavocMutator → EvolutionaryLoop (si
 | `src/evolutionary/corpus.rs` | SeedCorpus with energy-bucketed power scheduling, Feedback trait, HttpFeedback |
 | `src/evolutionary/evolution.rs` | Main loop blending generation (gen_ratio) with mutation |
 | `src/evolutionary/rng.rs` | Dual-mode RNG (SmallRng for speed, ChaCha12 for replay stability) |
-| `src/signals/signal.rs` | 6 classifiers: Status, Size, Reflection, TimeDelay, BodyDiff, Error |
+| `src/signals/signal.rs` | 7 classifiers: Status, Size, Reflection, TimeDelay, BodyDiff, Error, BodySignature (per-class leak-content signatures) |
 | `src/signals/mutator.rs` | Signal-guided payload mutator (alternative to evolutionary engine) |
 | `src/baseline.rs` | BaselineProfile — null-hypothesis signal filtering + confidence scoring |
 | `src/agent.rs` | Fuzzer builder API with 8 vuln presets (SQLi, XSS, SSTI, CMDi, SSRF, path traversal, NoSQLi, XXE) |
@@ -58,7 +58,16 @@ atoms → WeightedSampler (ChainTable) → HavocMutator → EvolutionaryLoop (si
 ## Calibration Status
 
 Analysis is complete (see `stuff/CALIBRATION_TODO.md` and `stuff/CALIBRATION_IMPLICATIONS.md`).
-Seven priority code changes identified but not yet applied:
+
+**Mock-harness fixes applied** (previously three targets were stuck at 0 hits due
+to test-harness artifacts, not the engine):
+- Fixed `mock_config.rs` payload truncation at `=` → `xss-reflected` 0 → ~272/300.
+- Realistic mock leak bodies + new `BodySignatureClassifier` (per-class content
+  signatures) so path-traversal / SSRF can confirm on leaked content rather than
+  the deliberately-noisy `SizeDelta` → both 0 → ~280/300. Targets declare
+  `confirm_signatures` in TOML; `calibrate` wires them per-target.
+
+Remaining priority code changes (from the sweeps, not yet applied):
 
 1. `ops_per_step`: 4 → 1 (`havoc.rs`)
 2. `replace_token` weight: 3.0 → 0.5 (`havoc.rs`)
@@ -66,7 +75,6 @@ Seven priority code changes identified but not yet applied:
 4. `TimeDelayClassifier.min_abs_ms`: 500 → 200 (`signal.rs`)
 5. Remove `SizeClassifier` from SSTI preset (`agent.rs`)
 6. `LengthPolicy` presets are backwards — short chains win (`atoms.rs`)
-7. Fix `mock_config.rs` payload truncation at `=` (breaks XSS testing)
 
 ## File Layout
 

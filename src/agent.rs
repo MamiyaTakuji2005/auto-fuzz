@@ -216,7 +216,8 @@ impl Preset {
             signal_set: SignalSet::new()
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(SizeClassifier::default()))
-                .with(Box::new(ReflectionClassifier)),
+                .with(Box::new(ReflectionClassifier))
+                .with(Box::new(BodySignatureClassifier::file_read())),
             gen_ratio: 0.7, // similar profile to XSS, needs chain depth for ../ patterns
             length: LengthPolicy::long(),
             ..Default::default()
@@ -245,7 +246,8 @@ impl Preset {
             signal_set: SignalSet::new()
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(SizeClassifier::default()))
-                .with(Box::new(TimeDelayClassifier::default())),
+                .with(Box::new(TimeDelayClassifier::default()))
+                .with(Box::new(BodySignatureClassifier::cloud_metadata())),
             gen_ratio: 0.0, // pure havoc — generation doesn't help URL-based payloads
             ..Default::default()
         }

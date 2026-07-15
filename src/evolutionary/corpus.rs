@@ -369,6 +369,7 @@ impl Feedback for HttpFeedback {
         for s in ctx.filtered_signals {
             let rank = match s {
                 Signal::Error { .. } => { confirmed = true; 6 }
+                Signal::LeakSignature { .. } => { confirmed = true; 5 }
                 Signal::TimeDelay { .. } => { confirmed = true; 5 }
                 Signal::Reflected { encoding } => {
                     if matches!(encoding, ReflectionEncoding::Literal) { confirmed = true; }

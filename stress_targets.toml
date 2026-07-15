@@ -78,7 +78,11 @@ baseline_url = "http://mock/?url=http://example.com"
 [targets.response]
 triggers = ["169.254", "metadata", "ami-id"]
 trigger_status = 200
-trigger_body = "ami-12345678"
+# Realistic metadata response — the old 12-byte body fell under the
+# SizeClassifier 50-byte floor, so no signal could fire.
+trigger_body = '''
+{"Code":"Success","LastUpdated":"2026-07-15T19:51:03Z","Type":"AWS-HMAC","AccessKeyId":"ASIAIOSFODNN7EXAMPLE","SecretAccessKey":"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY","Token":"IQoJb3JpZ2luX2VjEND...","Expiration":"2026-07-15T20:00:00Z"}'''
+confirm_signatures = ["AccessKeyId", "ami-id"]
 clean_delay_ms = 5
 trigger_delay_ms = 200
 
@@ -90,7 +94,15 @@ baseline_url = "http://mock/?q=1"
 [targets.response]
 triggers = ["../", "etc/passwd", "%2e%2e"]
 trigger_status = 200
-trigger_body = "root:x:0:0:root:/root:/bin/bash"
+# Realistic leak: the whole file, not one 31-byte line (under the floor).
+trigger_body = '''
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+bin:x:2:2:bin:/bin:/usr/sbin/nologin
+sys:x:3:3:sys:/dev:/usr/sbin/nologin
+www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin
+'''
+confirm_signatures = ["root:x:0:0"]
 clean_delay_ms = 5
 trigger_delay_ms = 5
 

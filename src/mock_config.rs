@@ -36,6 +36,12 @@ pub struct ResponseConfig {
     pub trigger_delay_ms: u64,
     #[serde(default = "default_clean_delay")]
     pub clean_delay_ms: u64,
+    /// Literal substrings that only appear in a genuinely-leaked response
+    /// (e.g. `root:x:0:0`, `AccessKeyId`). When set, calibration wires a
+    /// `BodySignatureClassifier` so classes detectable only by leaked content
+    /// (path-traversal, SSRF) can actually confirm a hit.
+    #[serde(default)]
+    pub confirm_signatures: Vec<String>,
 }
 
 fn default_clean_status() -> u16 { 200 }
@@ -83,12 +89,15 @@ impl ConfigProbe {
 impl Probe for ConfigProbe {
     async fn send(&self, req: &Request) -> Result<ProbeResponse, String> {
         // Extract the injected payload from the URL query string.
+        // Split only on the FIRST `=` — the payload itself may contain `=`
+        // (e.g. `<img src=x onerror=alert(1)>`). Using `split('=').nth(1)`
+        // here truncates at the second `=` and breaks reflection matching.
         let payload = req
             .url
             .split('?')
             .nth(1)
             .unwrap_or("")
-            .split('=')
+            .splitn(2, '=')
             .nth(1)
             .unwrap_or("")
             .to_string();

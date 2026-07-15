@@ -16,7 +16,7 @@ atoms → sampler → mutator → loop (signals + feedback) → transport
 - `LengthPolicy` — geometric stop probability. `short()`, `medium()`, `long()`, `fixed(n)`
 
 ### Signals (`signals/`)
-- Six classifiers: Status, Size, BodyDiff, Reflection (literal / percent-encoded / HTML-encoded), TimeDelay, Error (DBMS regex library)
+- Seven classifiers: Status, Size, BodyDiff, Reflection (literal / percent-encoded / HTML-encoded), TimeDelay, Error (DBMS regex library), BodySignature (per-class leak-content signatures, e.g. `root:x:0:0` / `AccessKeyId` — confirms file-read / SSRF)
 - `BaselineProfile` — captures and filters ambient signals. Variant-specific matching (status class + direction, error family + snippet, magnitude)
 - `Probe` trait — `async fn send(&self, req: &Request) -> Result<ProbeResponse, String>`
 

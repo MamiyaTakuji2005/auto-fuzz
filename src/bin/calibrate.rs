@@ -26,8 +26,8 @@ use auto_fuzz::evolutionary::havoc::HavocSchedule;
 
 use auto_fuzz::mock_config::{load_config, ConfigProbe, MockTarget};
 use auto_fuzz::signals::signal::{
-    ErrorClassifier, ReflectionClassifier, StatusClassifier, TimeDelayClassifier,
-    Signal, ReflectionEncoding,
+    BodySignatureClassifier, ErrorClassifier, ReflectionClassifier, StatusClassifier,
+    TimeDelayClassifier, Signal, ReflectionEncoding,
 };
 use auto_fuzz::signals::{Request, SignalSet};
 
@@ -159,6 +159,7 @@ impl Feedback for ConfigurableFeedback {
         for s in ctx.filtered_signals {
             let rank = match s {
                 Signal::Error { .. } => { confirmed = true; self.scores.error }
+                Signal::LeakSignature { .. } => { confirmed = true; 5 }
                 Signal::TimeDelay { .. } => { confirmed = true; self.scores.timedelay }
                 Signal::Reflected { encoding } => {
                     if matches!(encoding, ReflectionEncoding::Literal) { confirmed = true; }
@@ -394,11 +395,19 @@ async fn run_one(
         havoc = havoc.with_schedule(sched.clone());
     }
 
-    let signal_set = SignalSet::new()
+    let mut signal_set = SignalSet::new()
         .with(Box::new(StatusClassifier))
         .with(Box::new(ErrorClassifier::dbms_starter()))
         .with(Box::new(ReflectionClassifier))
         .with(Box::new(TimeDelayClassifier::default()));
+    // Per-class confirmation: targets that leak identifiable content (path
+    // traversal, SSRF) declare `confirm_signatures` so a match confirms a hit.
+    // Gated so it never touches targets that don't need it.
+    if !probe.target.response.confirm_signatures.is_empty() {
+        signal_set = signal_set.with(Box::new(BodySignatureClassifier::from_needles(
+            &probe.target.response.confirm_signatures,
+        )));
+    }
 
     let mut feedback = build_feedback(config.feedback_preset);
     if let Some(min_score) = config.min_score_override {

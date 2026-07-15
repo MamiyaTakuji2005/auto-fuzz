@@ -97,6 +97,7 @@ impl SignalGuidedMutator {
         for s in signals {
             let (rank, kind) = match s {
                 Signal::Error { .. }       => (6, s.kind()),
+                Signal::LeakSignature { .. } => (5, s.kind()),
                 Signal::TimeDelay { .. }   => (5, s.kind()),
                 Signal::Reflected { .. }   => (4, s.kind()),
                 Signal::StatusDelta { .. } => (3, s.kind()),
