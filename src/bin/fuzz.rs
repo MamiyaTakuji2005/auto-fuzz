@@ -166,10 +166,24 @@ async fn main() {
         }
     };
 
-    // When injecting into a query param, strip any existing query so the
-    // injection point is unambiguous (avoids `?id=&id=<payload>`).
+    // When injecting into a query param, drop only that param's existing value
+    // (the injection re-adds it) but KEEP the other params — e.g. DVWA's SQLi
+    // needs `Submit=Submit` alongside the injected `id`. Falls back to a plain
+    // `?`-split if the URL doesn't parse.
     let base_url = match &args.inject_query {
-        Some(_) => args.url.split('?').next().unwrap_or(&args.url).to_string(),
+        Some(param) => match url::Url::parse(&args.url) {
+            Ok(mut u) => {
+                let kept: Vec<(String, String)> = u.query_pairs()
+                    .filter(|(k, _)| k != param)
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect();
+                u.query_pairs_mut().clear();
+                for (k, v) in &kept { u.query_pairs_mut().append_pair(k, v); }
+                if kept.is_empty() { u.set_query(None); }
+                u.to_string()
+            }
+            Err(_) => args.url.split('?').next().unwrap_or(&args.url).to_string(),
+        },
         None => args.url.clone(),
     };
 
