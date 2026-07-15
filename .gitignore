@@ -1,2 +1,18 @@
+# Rust build output
 target/
+
+# Calibration working artifacts (plots, data, scripts)
 stuff/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*

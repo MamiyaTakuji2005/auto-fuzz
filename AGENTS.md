@@ -1,0 +1,88 @@
+# AGENTS.md — auto-fuzz
+
+## What This Project Is
+
+Evolutionary web fuzzer engine in Rust. Atom-chain generation + havoc mutation, driven by response signal feedback. Extracted from [re:Vise](https://github.com/MamiyaTakuji2005/re-Vise).
+
+## Build & Run
+
+```bash
+cargo check                              # type-check (fast)
+cargo test                               # run all unit tests
+cargo run --example report --release     # benchmarks
+cargo run --bin calibrate --release -- targets.toml   # calibration sweep
+cargo run --bin stress --release -- stress_targets.toml
+cargo run --bin fuzz-gui --features gui --release   # GUI workbench
+```
+
+Binaries (`src/bin/`): `calibrate`, `stress`, `signal_sweep`, `atom_audit`, `cap_sweep`, `havoc_ablation`, `sweep`, `fuzz-gui` (feature `gui`).
+
+**fuzz-gui** is the interactive workbench — exposes all 8 presets, 4 fuzz modes, 6 injection points, request timeout, and stop-on-first-hit. Uses the `Fuzzer` builder API directly with progress reporting and cancellation.
+
+## Architecture
+
+```
+atoms → WeightedSampler (ChainTable) → HavocMutator → EvolutionaryLoop (signals + feedback) → Probe/transport
+```
+
+| Module | Responsibility |
+|--------|---------------|
+| `src/evolutionary/atoms.rs` | Atom vocabulary, ChainTable (Markov-like transitions), WeightedSampler, PlacementPolicy, LengthPolicy |
+| `src/evolutionary/havoc.rs` | 12 stochastic mutation operators with weighted scheduling |
+| `src/evolutionary/corpus.rs` | SeedCorpus with energy-bucketed power scheduling, Feedback trait, HttpFeedback |
+| `src/evolutionary/evolution.rs` | Main loop blending generation (gen_ratio) with mutation |
+| `src/evolutionary/rng.rs` | Dual-mode RNG (SmallRng for speed, ChaCha12 for replay stability) |
+| `src/signals/signal.rs` | 6 classifiers: Status, Size, Reflection, TimeDelay, BodyDiff, Error |
+| `src/signals/mutator.rs` | Signal-guided payload mutator (alternative to evolutionary engine) |
+| `src/baseline.rs` | BaselineProfile — null-hypothesis signal filtering + confidence scoring |
+| `src/agent.rs` | Fuzzer builder API with 8 vuln presets (SQLi, XSS, SSTI, CMDi, SSRF, path traversal, NoSQLi, XXE) |
+| `src/payloads.rs` | Classic payload tables (179 payloads across 8 categories) |
+| `src/mock_config.rs` | TOML-defined mock targets for offline calibration |
+
+## Key Concepts
+
+- **Atoms**: Minimal string tokens (`'`, `<`, `UNION`, `{{`, etc.) — the vocabulary.
+- **ChainTable**: Sparse `(from, to) → weight` map for transition probabilities. Missing pairs default to 1.0.
+- **gen_ratio**: 0.0 = pure havoc mutation, 1.0 = pure generation, 0.7 = default blend.
+- **HavocOps**: 12 mutation operators (insert, replace, delete, duplicate, splice, URL-encode, boundary values, repeat, wrap, reverse, uppercase).
+- **SeedCorpus**: AFL-inspired energy scheduling. High-energy entries get more mutations.
+- **BaselineProfile**: Sends empty-payload request first, classifies ambient signals, filters them from probe results.
+
+## Conventions
+
+- Release profile: `opt-level = "z"`, LTO, single codegen unit, stripped symbols (size-optimized).
+- Deterministic replay: use `RngMode::ChaCha12` + fixed seed.
+- Mock targets defined in TOML (`targets.toml`, `stress_targets.toml`, `nums_targets.toml`).
+- Calibration data/plots/scripts live in `stuff/` (gitignored).
+
+## Calibration Status
+
+Analysis is complete (see `stuff/CALIBRATION_TODO.md` and `stuff/CALIBRATION_IMPLICATIONS.md`).
+Seven priority code changes identified but not yet applied:
+
+1. `ops_per_step`: 4 → 1 (`havoc.rs`)
+2. `replace_token` weight: 3.0 → 0.5 (`havoc.rs`)
+3. `repeat_payload` weight: 0.5 → 1.5 (`havoc.rs`)
+4. `TimeDelayClassifier.min_abs_ms`: 500 → 200 (`signal.rs`)
+5. Remove `SizeClassifier` from SSTI preset (`agent.rs`)
+6. `LengthPolicy` presets are backwards — short chains win (`atoms.rs`)
+7. Fix `mock_config.rs` payload truncation at `=` (breaks XSS testing)
+
+## File Layout
+
+```
+src/
+├── lib.rs                 # crate root
+├── agent.rs               # Fuzzer builder API (main public interface)
+├── baseline.rs            # null-hypothesis signal filtering
+├── mock_config.rs         # TOML mock targets
+├── payloads.rs            # classic payload tables
+├── bin/                   # 8 tool binaries
+├── evolutionary/          # core engine (atoms, havoc, corpus, evolution, rng)
+└── signals/               # classification + mutator primitives
+examples/                  # benchmark, digits demo, report suite
+stuff/                     # calibration data, plots, scripts (gitignored)
+targets.toml               # main calibration mock targets
+stress_targets.toml        # extended stress test targets
+nums_targets.toml          # numeric distribution test targets
+```
