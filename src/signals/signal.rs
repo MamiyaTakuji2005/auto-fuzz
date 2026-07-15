@@ -72,6 +72,10 @@ pub enum Signal {
     /// Signals ORDER BY / structural injection where ordering changes content
     /// but not byte count — invisible to SizeDelta.
     BodyDiff,
+    /// The response is unlike anything in the calibrated "boring set" — a
+    /// recall-first novelty flag (see ANOMALY.md). Not a confirmation; a
+    /// "this is different, look at it" report. `detail` names what deviated.
+    Anomaly { detail: String },
 }
 
 /// How a reflected payload appears in the response.
@@ -101,6 +105,7 @@ impl Signal {
             Signal::LeakSignature { .. } => "leak_signature",
             Signal::TimeDelay { .. } => "time_delay",
             Signal::BodyDiff => "body_diff",
+            Signal::Anomaly { .. } => "anomaly",
         }
     }
 }
@@ -133,6 +138,12 @@ impl SignalSet {
     pub fn with(mut self, classifier: Box<dyn Classifier>) -> Self {
         self.classifiers.push(classifier);
         self
+    }
+
+    /// Append a classifier in place (e.g. bolt on the `NoveltyClassifier` for
+    /// `--hunt` after the set is already built).
+    pub fn push(&mut self, classifier: Box<dyn Classifier>) {
+        self.classifiers.push(classifier);
     }
 
     /// A starter set: status, size, body-diff, reflection, time-delay, and one error library.
@@ -432,12 +443,127 @@ impl Classifier for BodySignatureClassifier {
     }
 }
 
+/// A cheap response fingerprint: the four features every content-discovery
+/// fuzzer keys on (status, size, word count, line count). No stats, no ML.
+#[derive(Debug, Clone, PartialEq)]
+struct Fingerprint {
+    status: u16,
+    size: usize,
+    words: usize,
+    lines: usize,
+}
+
+impl Fingerprint {
+    fn of(r: &ProbeResponse) -> Self {
+        let text = r.body_text();
+        Self {
+            status: r.status,
+            size: r.body.len(),
+            words: text.split_whitespace().count(),
+            lines: text.lines().count(),
+        }
+    }
+}
+
+/// Recall-first novelty detector (see ANOMALY.md). Learns a "boring set" of
+/// response fingerprints (seeded from the baseline; extensible to ffuf-style
+/// autocalibration) and flags any probe whose fingerprint is unlike *all* of
+/// them — status differs, OR size/word/line counts fall outside tolerance.
+///
+/// This is the greedy, OR-combined counterpart to the precision-gated
+/// classifiers: it exists to surface the rare unusual response for human
+/// review, accepting false positives as the cost of not missing a hit.
+pub struct NoveltyClassifier {
+    boring: std::sync::Mutex<Vec<Fingerprint>>,
+    /// Tolerances — how far a feature may drift and still count as "boring".
+    /// Small, non-zero to absorb minor dynamic wobble without going blind.
+    size_tol: usize,
+    word_tol: usize,
+    line_tol: usize,
+}
+
+impl NoveltyClassifier {
+    /// Sensitive defaults: tiny tolerances so almost any deviation flags.
+    pub fn new() -> Self {
+        Self {
+            boring: std::sync::Mutex::new(Vec::new()),
+            size_tol: 16,
+            word_tol: 2,
+            line_tol: 1,
+        }
+    }
+
+    /// Pre-seed the boring set with a known-normal response (autocalibration).
+    pub fn calibrate(&self, normal: &ProbeResponse) {
+        let fp = Fingerprint::of(normal);
+        let mut boring = self.boring.lock().unwrap();
+        if !boring.iter().any(|f| *f == fp) {
+            boring.push(fp);
+        }
+    }
+
+    fn is_boring(&self, boring: &[Fingerprint], p: &Fingerprint) -> bool {
+        boring.iter().any(|b| {
+            b.status == p.status
+                && p.size.abs_diff(b.size) <= self.size_tol
+                && p.words.abs_diff(b.words) <= self.word_tol
+                && p.lines.abs_diff(b.lines) <= self.line_tol
+        })
+    }
+}
+
+impl Default for NoveltyClassifier {
+    fn default() -> Self { Self::new() }
+}
+
+impl Classifier for NoveltyClassifier {
+    fn classify(&self, _payload: &str, baseline: &ProbeResponse, probe: &ProbeResponse) -> Option<Signal> {
+        // Learn the baseline into the boring set (idempotent). During
+        // BaselineProfile::capture the probe *is* the baseline, so this both
+        // seeds the set and correctly flags nothing.
+        self.calibrate(baseline);
+
+        let p = Fingerprint::of(probe);
+        let boring = self.boring.lock().unwrap();
+        if self.is_boring(&boring, &p) {
+            return None;
+        }
+        let b = Fingerprint::of(baseline);
+        let mut parts = Vec::new();
+        if p.status != b.status { parts.push(format!("status {}→{}", b.status, p.status)); }
+        if p.size != b.size { parts.push(format!("size {}→{}", b.size, p.size)); }
+        if p.words != b.words { parts.push(format!("words {}→{}", b.words, p.words)); }
+        if p.lines != b.lines { parts.push(format!("lines {}→{}", b.lines, p.lines)); }
+        Some(Signal::Anomaly { detail: parts.join(", ") })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn resp(status: u16, body: &str, ms: u64) -> ProbeResponse {
         ProbeResponse { status, body: body.as_bytes().to_vec(), duration: Duration::from_millis(ms) }
+    }
+
+    #[test]
+    fn novelty_flags_deviation_but_not_the_boring_set() {
+        let c = NoveltyClassifier::new();
+        let base = resp(200, "the quick brown fox jumps", 5);
+        // baseline-vs-baseline (capture): seeds the boring set, flags nothing.
+        assert!(c.classify("", &base, &base).is_none());
+        // A near-identical response within tolerance stays boring.
+        assert!(c.classify("x", &base, &resp(200, "the quick brown fox jump", 5)).is_none());
+        // Status change → anomaly.
+        assert!(matches!(
+            c.classify("x", &base, &resp(500, "the quick brown fox jumps", 5)),
+            Some(Signal::Anomaly { .. })
+        ));
+        // Big size/word/line change → anomaly.
+        assert!(matches!(
+            c.classify("x", &base, &resp(200, "totally different and much much longer body here now", 5)),
+            Some(Signal::Anomaly { .. })
+        ));
     }
 
     #[test]

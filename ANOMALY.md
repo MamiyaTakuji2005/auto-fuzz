@@ -1,7 +1,11 @@
 # Anomaly detection — recall-first design (planned)
 
-Status: **design note, not yet built.** Captures the intended direction so the
-thresholds and reporting can be built toward it later. Inline `// recall-first:`
+Status: **partially built.** The `NoveltyClassifier` ships behind `--hunt`
+(`fuzz --hunt` / `Fuzzer::hunt()`) — it fingerprints every response as
+`(status, size, words, lines)` and flags anything unlike the baseline as a
+`Signal::Anomaly`, reported (not confirmed) at a low corpus score. Still to do:
+multi-sample autocalibration (boring *set*, not just the baseline), the wobble
+mitigation, and report-side triage (rank/group/dedup). Inline `// recall-first:`
 comments in the code point back here.
 
 ## The base-rate inversion
@@ -51,17 +55,20 @@ No statistics, no ML — a tiny feature vector and set membership:
 
 ## Lightweight build sketch
 
-1. **Autocalibration in `BaselineProfile`** — instead of one baseline sample,
-   fire ~3 requests (empty + two junk tokens) and record each as a fingerprint
-   `(status, size, words, lines)`. That set is "boring." Cost: 2 extra requests,
-   O(response) to compute.
-2. **`NoveltyClassifier`** — fingerprint each probe; if it's not within tolerance
-   of any boring-set entry, emit an `Anomaly` signal → straight to the report,
-   no signature required.
-3. **Wobble (dynamic content):** compare the calibration probes to *each other*.
-   If size varies across identical-intent requests, widen the size tolerance or
-   lean on word/line counts (more stable). The cheap 80% of sqlmap's dynamic
-   removal without per-line diffing.
+1. **`NoveltyClassifier`** ✅ *(built — `signal.rs`)* — fingerprint each probe;
+   if it's not within tolerance of any boring-set entry, emit an `Anomaly` signal
+   → straight to the report, no signature required. Currently the boring set is
+   seeded from the single baseline (via `calibrate()`, called on the
+   baseline-vs-baseline capture pass). Tolerances default sensitive
+   (size ±16, words ±2, lines ±1).
+2. **Autocalibration** *(todo)* — instead of one baseline sample, fire ~3
+   requests (empty + two junk tokens) and `calibrate()` the classifier with each,
+   building a boring *set*. Cost: 2 extra requests. The hook (`calibrate()`)
+   already exists; it just needs the extra probes wired in `Fuzzer::run`.
+3. **Wobble (dynamic content)** *(todo)* — compare the calibration probes to
+   *each other*. If size varies across identical-intent requests, widen the size
+   tolerance or lean on word/line counts (more stable). The cheap 80% of
+   sqlmap's dynamic removal without per-line diffing.
 
 ## Where precision currently costs recall
 

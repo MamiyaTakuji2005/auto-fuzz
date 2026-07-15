@@ -105,6 +105,7 @@ impl SignalGuidedMutator {
                     if *ratio >= 3.0 || *ratio <= 0.33 { (3, s.kind()) } else { (2, s.kind()) }
                 },
                 Signal::BodyDiff           => (3, s.kind()),
+                Signal::Anomaly { .. }     => (2, s.kind()),
                 Signal::NoEffect           => (1, s.kind()),
             };
             if rank > best_rank { best_rank = rank; best_kind = kind; }

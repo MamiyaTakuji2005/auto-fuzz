@@ -24,6 +24,7 @@ struct Args {
     budget: usize,
     timeout_secs: u64,
     mode: FuzzMode,
+    hunt: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -35,6 +36,7 @@ fn parse_args() -> Result<Args, String> {
     let mut budget = 100usize;
     let mut timeout_secs = 15u64;
     let mut mode = FuzzMode::Evolutionary;
+    let mut hunt = false;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -62,6 +64,7 @@ fn parse_args() -> Result<Args, String> {
                     other => return Err(format!("unknown mode: {other}")),
                 };
             }
+            "--hunt" => hunt = true,
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown flag: {other}")),
         }
@@ -77,6 +80,7 @@ fn parse_args() -> Result<Args, String> {
         budget,
         timeout_secs,
         mode,
+        hunt,
     })
 }
 
@@ -145,7 +149,7 @@ async fn main() {
             if e != "help" { eprintln!("error: {e}\n"); }
             eprintln!("usage: fuzz --preset <sqli|xss|ssti|cmdi|path|nosql|ssrf|xxe> --url <URL> \\");
             eprintln!("            [--inject-query <param> | --inject-body '<tmpl with {{{{payload}}}}>'] \\");
-            eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary]");
+            eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary] [--hunt]");
             std::process::exit(if e == "help" { 0 } else { 2 });
         }
     };
@@ -181,6 +185,10 @@ async fn main() {
         f = f.inject_query(q);
     }
     f = f.budget(args.budget);
+    if args.hunt {
+        f = f.hunt();
+        println!("mode:      HUNT (recall-first — flags any response unlike baseline)");
+    }
 
     match f.run().await {
         Ok(r) => report(&r),

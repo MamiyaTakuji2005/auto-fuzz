@@ -414,6 +414,8 @@ pub struct Fuzzer<P: Probe> {
     stop_on_confirmation: bool,
     /// Optional progress callback: `(probes_sent, total_budget)`. Called once per probe.
     progress: Option<Arc<dyn Fn(usize, usize) + Send + Sync>>,
+    /// Recall-first: bolt on the NoveltyClassifier to flag any unusual response.
+    hunt: bool,
 }
 
 impl<P: Probe> Fuzzer<P> {
@@ -431,6 +433,7 @@ impl<P: Probe> Fuzzer<P> {
             additional_seeds: vec![],
             stop_on_confirmation: false,
             progress: None,
+            hunt: false,
         }
     }
 
@@ -544,6 +547,11 @@ impl<P: Probe> Fuzzer<P> {
     pub fn gen_ratio(mut self, r: f32) -> Self { self.preset.gen_ratio = r.clamp(0.0, 1.0); self }
     pub fn stop_on_first_hit(mut self) -> Self { self.stop_on_confirmation = true; self }
 
+    /// Recall-first hunt mode: append the `NoveltyClassifier` so any response
+    /// unlike the baseline's fingerprint is flagged as `anomalous`, even without
+    /// a matching vuln signature. Accepts false positives to avoid misses.
+    pub fn hunt(mut self) -> Self { self.hunt = true; self }
+
     /// Attach a progress callback. Called as `f(probes_sent, total_budget)` per probe.
     pub fn on_progress(mut self, cb: Arc<dyn Fn(usize, usize) + Send + Sync>) -> Self {
         self.progress = Some(cb);
@@ -552,8 +560,14 @@ impl<P: Probe> Fuzzer<P> {
 
     // ── Run ───────────────────────────────────────────────────────────
 
-    pub async fn run(self) -> Result<FuzzResult, String> {
+    pub async fn run(mut self) -> Result<FuzzResult, String> {
         let probe = self.probe.clone();
+
+        // Recall-first hunt mode: bolt the novelty detector onto the signal set
+        // before the baseline is captured, so it learns the baseline fingerprint.
+        if self.hunt {
+            self.preset.signal_set.push(Box::new(NoveltyClassifier::new()));
+        }
 
         // ── Baseline: same shape as fuzzed requests ──────────────────
         let injection = self.injection.clone();

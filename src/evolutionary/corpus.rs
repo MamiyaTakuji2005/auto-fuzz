@@ -388,6 +388,9 @@ impl Feedback for HttpFeedback {
                     if *ratio >= 3.0 || *ratio <= 0.33 { 3 } else { 2 }
                 }
                 Signal::BodyDiff => 2,
+                // recall-first (see ANOMALY.md): report it (>= min_corpus_score)
+                // but keep it low so heavy havoc doesn't chase every wobble.
+                Signal::Anomaly { .. } => 2,
                 Signal::NoEffect => 0,
             };
             if rank > best_rank {

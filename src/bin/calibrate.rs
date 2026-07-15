@@ -174,6 +174,7 @@ impl Feedback for ConfigurableFeedback {
                     else { self.scores.size_low }
                 }
                 Signal::BodyDiff => self.scores.bodydiff,
+                Signal::Anomaly { .. } => 2,
                 Signal::NoEffect => 0,
             };
             if rank > best_rank {
