@@ -33,6 +33,11 @@ pub struct BaselineProfile {
 }
 
 impl BaselineProfile {
+    // recall-first (see ANOMALY.md): this captures a SINGLE baseline sample.
+    // The planned anomaly detector extends this into ffuf-style autocalibration —
+    // a few bogus probes forming a "boring set" of (status, size, words, lines)
+    // fingerprints — so novelty = "unlike anything in the boring set" and dynamic
+    // wobble is absorbed by comparing the calibration probes to each other.
     pub fn capture(baseline: &ProbeResponse, signal_set: &SignalSet) -> Self {
         let ambient = signal_set.run("", baseline, baseline);
         Self {

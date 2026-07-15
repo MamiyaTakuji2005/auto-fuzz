@@ -118,6 +118,10 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+// recall-first (see ANOMALY.md): triage belongs HERE, in the report — not in
+// the detector. When the anomaly detector lands, this is where the noise it
+// accepts by design gets made cheap to scan: rank by deviation magnitude, group
+// identical fingerprints (500 identical 403s = one line), dedup payloads.
 fn report(r: &FuzzResult) {
     println!("\n─── result ───────────────────────────────────────────");
     println!("probes sent:   {}", r.probes_sent);

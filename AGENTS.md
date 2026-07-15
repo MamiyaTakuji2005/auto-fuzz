@@ -34,6 +34,11 @@ Binaries (`src/bin/`): `calibrate`, `stress`, `signal_sweep`, `atom_audit`, `cap
 
 **fuzz-gui** is the interactive workbench — exposes all 8 presets, 4 fuzz modes, 6 injection points, request timeout, and stop-on-first-hit. Uses the `Fuzzer` builder API directly with progress reporting and cancellation.
 
+**Design notes:** `ANOMALY.md` — planned recall-first anomaly detection (why
+this project wants recall where ffuf-style tools want precision, and the
+lightweight autocalibration build for it). Inline `// recall-first:` comments in
+`signal.rs`, `baseline.rs`, `corpus.rs`, and `bin/fuzz.rs` point back to it.
+
 ## Architecture
 
 ```

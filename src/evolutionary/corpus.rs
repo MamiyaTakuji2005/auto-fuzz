@@ -353,6 +353,12 @@ pub trait Feedback: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct HttpFeedback {
     /// Minimum score to add to corpus (default: 2 — any real signal).
+    ///
+    /// recall-first (see ANOMALY.md): this gate controls *corpus energy*, which
+    /// is a separate dial from *reporting*. A recall-first anomaly detector flags
+    /// everything unusual to the human, but feeding every mild anomaly back here
+    /// as high energy makes heavy havoc chase noise. Keep this selective even if
+    /// the report is greedy — detection recall and exploration guidance differ.
     pub min_corpus_score: u8,
 }
 

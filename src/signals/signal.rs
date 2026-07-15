@@ -188,6 +188,9 @@ impl Classifier for SizeClassifier {
         let p = probe.body.len();
         let abs = if b > p { b - p } else { p - b };
         let rel = if b == 0 { 1.0 } else { (abs as f64) / (b as f64) };
+        // recall-first (see ANOMALY.md): this ANDs abs+rel for precision. A
+        // `sensitive()`/`--hunt` mode should OR them and lower both — a 40-byte
+        // delta on a 2 KB page is exactly the outlier we don't want to drop.
         if abs >= self.min_abs && rel >= self.min_rel {
             let ratio = (p as f64) / (b as f64).max(1.0);
             Some(Signal::SizeDelta { baseline_bytes: b, probe_bytes: p, ratio })
@@ -204,6 +207,8 @@ impl Classifier for ReflectionClassifier {
         // This suppresses single-char noise (e.g. "'", "<" appearing in benign
         // JSON/HTML contexts), at the cost of missing short-but-real reflections.
         // Trade-off: fewer false positives vs. blind spot for 1-2 char XSS probes.
+        // recall-first (see ANOMALY.md): this `< 3` skip is a deliberate blind
+        // spot; a `sensitive()`/`--hunt` mode should drop it and eat the noise.
         if payload.len() < 3 { return None; }
         let body = probe.body_text();
         let baseline_body = baseline.body_text();
@@ -270,6 +275,10 @@ pub struct TimeDelayClassifier {
     /// Probe duration must exceed baseline by this factor (e.g. 3.0 = 3× slower).
     pub min_factor: f64,
     /// Floor so noise on fast endpoints doesn't trigger ("10ms vs 30ms" is not a signal).
+    /// recall-first (see ANOMALY.md): this floor is a precision gate. It's the
+    /// right call for *confirmation*, but too coarse for anomaly flagging — a
+    /// `sensitive()`/`--hunt` mode wants a much lower floor (and eats the noise).
+    /// Lowering it 500→200 halved ssrf's hits/1k via the timing re-probe; see git log.
     pub min_abs_ms: u128,
 }
 impl Default for TimeDelayClassifier {
