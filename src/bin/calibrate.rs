@@ -19,7 +19,7 @@ use std::time::Instant;
 use auto_fuzz::evolutionary::{
     ChainTable, EvolutionaryLoop, HavocMutator, LengthPolicy,
     PlacementPolicy, SeedCorpus, WeightedSampler,
-    Feedback, FeedbackEval, EvaluationContext,
+    Feedback, FeedbackEval, EvaluationContext, BoostMode,
 };
 use auto_fuzz::evolutionary::atoms::ATOMS;
 use auto_fuzz::evolutionary::havoc::HavocSchedule;
@@ -293,6 +293,8 @@ struct CalibConfig {
     min_score_override: Option<u8>,
     /// Override atoms + chain table for vocab enrichment experiments.
     vocab_override: Option<(Vec<String>, ChainTable)>,
+    boost_mode: Option<BoostMode>,
+    max_energy: Option<u8>,
     max_probes: usize,
 }
 
@@ -307,6 +309,8 @@ impl CalibConfig {
             feedback_preset: FeedbackPreset::Default,
             min_score_override: None,
             vocab_override: None,
+            boost_mode: None,
+            max_energy: None,
             max_probes: DEFAULT_MAX_PROBES,
         }
     }
@@ -330,8 +334,20 @@ impl CalibConfig {
     }
 
     /// Override the atom vocabulary + chain table.
+    /// Override the boost mode.
+    fn with_boost(mut self, mode: BoostMode) -> Self {
+        self.boost_mode = Some(mode);
+        self
+    }
+
     fn with_vocab(mut self, atoms: Vec<String>, chain: ChainTable) -> Self {
         self.vocab_override = Some((atoms, chain));
+        self
+    }
+
+    /// Override the energy cap for the cap sweep.
+    fn with_max_energy(mut self, cap: u8) -> Self {
+        self.max_energy = Some(cap);
         self
     }
 }
@@ -355,7 +371,9 @@ async fn run_one(
 ) -> RunMetrics {
     let start = Instant::now();
 
-    let corpus = SeedCorpus::from_seeds(vec![probe.target.trigger_payload.clone()]);
+    let mut corpus = SeedCorpus::from_seeds(vec![probe.target.trigger_payload.clone()]);
+    if let Some(mode) = config.boost_mode { corpus = corpus.with_boost_mode(mode); }
+    if let Some(cap) = config.max_energy { corpus = corpus.with_max_energy(cap); }
 
     // Use vocab override if provided, otherwise the shared atom table + defaults.
     let (eff_atoms, eff_chain) = match &config.vocab_override {
@@ -650,6 +668,47 @@ async fn batch_target(
     }
     println!(" {}", 4 * trials as usize);
 
+    // ── Phase 10: BoostMode sweep ───────────────────────────────────────
+    // How parent energy grows when children find something.
+    // Additive (current) vs flat vs multiplicative vs none.
+    println!("  {} boost [none, additive, flat, multiplicative] @ gen={:.1} medium", name, best_gr);
+    for (tag, mode) in [
+        ("none",  BoostMode::None),
+        ("add",   BoostMode::Additive),
+        ("flat",  BoostMode::Flat),
+        ("mult",  BoostMode::Multiplicative),
+    ] {
+        let cfg = CalibConfig::new("boost", &format!("boost={}", tag),
+                                    best_gr, LengthPolicy::medium(),
+                                    PlacementPolicy::default(), None)
+                    .with_boost(mode);
+        for trial in 0..trials {
+            let m = run_one(probe.clone(), atoms, &cfg, trial).await;
+            rows.push((name.clone(), cfg.label.clone(), cfg.sweep_axis.to_string(), trial, m));
+            print!(".");
+        }
+    }
+    println!(" {}", 4 * trials as usize);
+
+    // ── Phase 11: Energy cap sweep ──────────────────────────────────────
+    // The energy cap limits how many times a parent can be boosted.
+    // Default is 64. Test whether a higher or lower cap changes behavior.
+    // Uses additive boost (current default) to isolate the cap effect.
+    println!("  {} max_energy [8, 16, 32, 64, 128, 255] @ boost=add gen={:.1} medium", name, best_gr);
+    for &cap in &[8u8, 16, 32, 64, 128, 255] {
+        let cfg = CalibConfig::new("cap", &format!("cap={}", cap),
+                                    best_gr, LengthPolicy::medium(),
+                                    PlacementPolicy::default(), None)
+                    .with_boost(BoostMode::Additive)
+                    .with_max_energy(cap);
+        for trial in 0..trials {
+            let m = run_one(probe.clone(), atoms, &cfg, trial).await;
+            rows.push((name.clone(), cfg.label.clone(), cfg.sweep_axis.to_string(), trial, m));
+            print!(".");
+        }
+    }
+    println!(" {}", 6 * trials as usize);
+
     rows
 }
 
@@ -721,7 +780,7 @@ async fn main() {
     println!("Done — {} data points written to {}", total, csv_path.display());
 
     // ── Quick per-axis summary ─────────────────────────────────────────────
-    for axis in &["gen_ratio", "length", "havoc", "placement", "ops", "feedback", "min_score", "stop_prob", "min_atoms", "vocab"] {
+    for axis in &["gen_ratio", "length", "havoc", "placement", "ops", "feedback", "min_score", "stop_prob", "min_atoms", "vocab", "boost", "cap"] {
         println!("\n--- {} sweep ---", axis);
         let mut grouped: HashMap<String, Vec<f64>> = HashMap::new();
         for (cls, label, ax, _trial, m) in &results {

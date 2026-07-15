@@ -232,7 +232,7 @@ impl<P: Probe> EvolutionaryLoop<P> {
     /// but deterministic from a single user-provided seed.
     const HAVOC_SEED_OFFSET: u64 = 0x9E37_79B9_7F4A_7C15;
 
-    pub async fn run<F>(mut self, baseline_req: &Request, inject: F)
+    pub async fn run<F>(self, baseline_req: &Request, inject: F)
         -> Result<EvolutionaryOutcome, String>
     where
         F: Fn(&str) -> Request,

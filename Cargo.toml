@@ -38,6 +38,26 @@ path = "src/bin/calibrate.rs"
 name = "stress"
 path = "src/bin/stress.rs"
 
+[[bin]]
+name = "signal_sweep"
+path = "src/bin/signal_sweep.rs"
+
+[[bin]]
+name = "atom_audit"
+path = "src/bin/atom_audit.rs"
+
+[[bin]]
+name = "cap_sweep"
+path = "src/bin/cap_sweep.rs"
+
+[[bin]]
+name = "havoc_ablation"
+path = "src/bin/havoc_ablation.rs"
+
+[[bin]]
+name = "sweep"
+path = "src/bin/sweep.rs"
+
 [features]
 default = []
 gui = ["dep:reqwest", "dep:egui", "dep:eframe"]

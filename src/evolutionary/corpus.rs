@@ -16,7 +16,6 @@ use rand::Rng;
 use crate::signals::signal::{Signal, ReflectionEncoding, ProbeResponse};
 use crate::signals::Request;
 use std::collections::HashMap;
-use std::time::Duration;
 
 // ── CorpusEntry ───────────────────────────────────────────────────────────────
 
@@ -100,6 +99,10 @@ impl BoostMode {
 
 // ── SeedCorpus ────────────────────────────────────────────────────────────────
 
+/// Maximum possible energy cap — bucket arrays are sized to this.
+/// Supports any cap up to 255 (u8::MAX).
+const BUCKET_CAP: usize = 256;
+
 /// The living corpus. Starts with seeds; grows as the evolutionary loop finds
 /// interesting payloads. Entries are never removed (AFL-style: removals introduce
 /// non-determinism and rarely help). Duplicate payloads are rejected — if a
@@ -108,10 +111,10 @@ pub struct SeedCorpus {
     entries: Vec<CorpusEntry>,
     total_energy: u32,
     index_by_payload: HashMap<String, usize>,
-    /// Buckets by energy level (1..MAX_ENERGY). Bucket 0 is unused.
-    buckets: [Vec<usize>; 65],
+    /// Buckets by energy level (0..BUCKET_CAP-1). Bucket 0 is unused.
+    buckets: [Vec<usize>; BUCKET_CAP],
     /// Precomputed per-bucket weight = bucket.len() * energy.
-    bucket_weights: [u32; 65],
+    bucket_weights: [u32; BUCKET_CAP],
     /// How parent energy grows on interesting children.
     pub boost_mode: BoostMode,
     /// Maximum energy any entry can reach. Default 64.
@@ -124,8 +127,8 @@ impl SeedCorpus {
             entries: Vec::new(),
             total_energy: 0,
             index_by_payload: HashMap::new(),
-            buckets: [(); 65].map(|_| Vec::new()),
-            bucket_weights: [0; 65],
+            buckets: [(); BUCKET_CAP].map(|_| Vec::new()),
+            bucket_weights: [0; BUCKET_CAP],
             boost_mode: BoostMode::default(),
             max_energy: 64,
         }
@@ -137,9 +140,9 @@ impl SeedCorpus {
         self
     }
 
-    /// Set the maximum energy cap.
+    /// Set the maximum energy cap. Valid range: 1–255.
     pub fn with_max_energy(mut self, cap: u8) -> Self {
-        self.max_energy = cap.min(64);
+        self.max_energy = cap.max(1);
         self
     }
 
@@ -235,7 +238,7 @@ impl SeedCorpus {
     }
 
     /// Power schedule: select the next entry to mutate, weighted by energy.
-    /// O(1) via energy buckets — walks 12 buckets instead of the full corpus.
+    /// O(n) via energy buckets — walks buckets instead of the full corpus.
     /// Returns the index; caller uses `entry()` to read the payload.
     pub fn schedule<R: Rng>(&mut self, rng: &mut R) -> Option<usize> {
         if self.entries.is_empty() { return None; }
@@ -243,11 +246,12 @@ impl SeedCorpus {
             self.entries[0].fuzz_count += 1;
             return Some(0);
         }
+        let cap = self.max_energy as usize;
         let mut pick = rng.gen_range(0..self.total_energy);
-        for energy in 1..=64u8 {
-            let w = self.bucket_weights[energy as usize];
+        for energy in 1..=cap {
+            let w = self.bucket_weights[energy];
             if pick < w {
-                let bucket = &self.buckets[energy as usize];
+                let bucket = &self.buckets[energy];
                 let idx = bucket[rng.gen_range(0..bucket.len())];
                 self.entries[idx].fuzz_count += 1;
                 return Some(idx);
@@ -393,6 +397,7 @@ impl Feedback for HttpFeedback {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn corpus_power_schedule_favors_high_energy() {

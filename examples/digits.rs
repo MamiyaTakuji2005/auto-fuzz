@@ -7,8 +7,6 @@
 //! must discover "7" and "42" through evolution.
 
 use auto_fuzz::evolutionary::*;
-use auto_fuzz::signals::*;
-use auto_fuzz::signals::signal::*;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Mutex;

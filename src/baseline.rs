@@ -262,7 +262,7 @@ mod tests {
     fn different_status_direction_survives() {
         // Baseline: 200→500 triggers a status delta.
         // Probe: 500→200 is a DIFFERENT status delta — different direction.
-        let baseline = resp(500, "err", 10);
+        let _baseline = resp(500, "err", 10);
         // We need an ambient StatusDelta. Let's craft it manually.
         let ambient = Signal::StatusDelta { from: 200, to: 500 };
         let probe_sig = Signal::StatusDelta { from: 500, to: 200 };

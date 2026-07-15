@@ -3,8 +3,6 @@
 //! Run: `cargo run --example benchmark --release`
 
 use auto_fuzz::evolutionary::*;
-use auto_fuzz::signals::*;
-use auto_fuzz::signals::signal::*;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

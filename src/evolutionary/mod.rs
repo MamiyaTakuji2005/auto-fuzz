@@ -26,7 +26,7 @@ pub use atoms::{
 };
 pub use havoc::{HavocMutator, HavocOp};
 pub use rng::{RngEngine, RngMode};
-pub use corpus::{CorpusEntry, SeedCorpus, Feedback, HttpFeedback, FeedbackEval, EvaluationContext};
+pub use corpus::{CorpusEntry, SeedCorpus, BoostMode, Feedback, HttpFeedback, FeedbackEval, EvaluationContext};
 pub use evolution::{EvolutionaryLoop, EvolutionaryOutcome, EvolutionaryHit, PayloadPolicy};
 
 // Re-export signal/mutator primitives so callers only need one import path.
