@@ -24,6 +24,10 @@ mechanics-first (baseline, probes, every signal observed) so the request →
 baseline-diff → classify pipeline is visible even with zero confirmed hits.
 `--header 'Name: Value'` (repeatable) and `--cookie 'a=b'` carry auth/session
 into every request (baseline + probes), for targets behind a login like DVWA.
+`--csrf-url <URL>` refreshes a per-request CSRF token (cookie store on) for
+stateful login forms. `--jsonl` emits one JSON object per hit to stdout (silent
+otherwise; summary to stderr) — pipes into jq or the single-target spider loop
+(`06-crawler`): spider maps a target's endpoints → fuzz each → JSONL findings.
 
 `tests/calibration.rs` is a deterministic regression guard: it runs every
 `targets.toml` target through the loop at fixed seeds and asserts each clears a

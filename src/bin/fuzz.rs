@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use auto_fuzz::agent::{FuzzMode, FuzzResult, Fuzzer, Hit};
+use auto_fuzz::agent::{FuzzMode, FuzzResult, Fuzzer, Hit, PayloadSource};
 use auto_fuzz::http::{CsrfConfig, HttpProbe};
 
 struct Args {
@@ -31,6 +31,8 @@ struct Args {
     csrf_url: Option<String>,
     csrf_field: String,
     csrf_regex: Option<String>,
+    /// Emit one JSON object per hit to stdout (implies silent — no banner/report).
+    jsonl: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -47,6 +49,7 @@ fn parse_args() -> Result<Args, String> {
     let mut csrf_url = None;
     let mut csrf_field = "user_token".to_string();
     let mut csrf_regex = None;
+    let mut jsonl = false;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -84,6 +87,7 @@ fn parse_args() -> Result<Args, String> {
             "--csrf-url" => csrf_url = Some(take_val(&mut i)?),
             "--csrf-field" => csrf_field = take_val(&mut i)?,
             "--csrf-regex" => csrf_regex = Some(take_val(&mut i)?),
+            "--jsonl" | "--json" => jsonl = true,
             "--hunt" => hunt = true,
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown flag: {other}")),
@@ -105,6 +109,7 @@ fn parse_args() -> Result<Args, String> {
         csrf_url,
         csrf_field,
         csrf_regex,
+        jsonl,
     })
 }
 
@@ -165,6 +170,39 @@ fn report(r: &FuzzResult) {
     }
 }
 
+/// Emit one JSON object per hit to stdout (ProjectDiscovery-style JSONL), so the
+/// stream pipes cleanly into jq / the crawler loop. A one-line summary goes to
+/// stderr, keeping stdout pure JSONL.
+fn emit_jsonl(r: &FuzzResult, url: &str, method: &str, inject: &str, preset: &str) {
+    let source_str = |s: &PayloadSource| match s {
+        PayloadSource::Table { preset, index } => format!("table:{preset}:{index}"),
+        PayloadSource::UserInput { index } => format!("input:{index}"),
+        PayloadSource::Evolutionary => "evolutionary".to_string(),
+    };
+    let line = |h: &Hit, confirmed: bool| {
+        let obj = serde_json::json!({
+            "url": url,
+            "method": method,
+            "inject": inject,
+            "preset": preset,
+            "payload": h.payload,
+            "confirmed": confirmed,
+            "score": h.adjusted_score,
+            "raw_score": h.raw_score,
+            "confidence": h.confidence,
+            "signals": h.signals,
+            "source": source_str(&h.source),
+        });
+        println!("{obj}");
+    };
+    for h in &r.confirmed { line(h, true); }
+    for h in &r.interesting { if !h.confirmed { line(h, false); } }
+    eprintln!(
+        "[fuzz] {} confirmed, {} interesting, {} probes",
+        r.confirmed.len(), r.interesting.len(), r.probes_sent
+    );
+}
+
 #[tokio::main]
 async fn main() {
     let args = match parse_args() {
@@ -176,6 +214,7 @@ async fn main() {
             eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary] [--hunt]");
             eprintln!("            [--header 'Name: Value']... [--cookie 'a=b; c=d']");
             eprintln!("            [--csrf-url <URL> [--csrf-field user_token] [--csrf-regex <pat with group 1>]]");
+            eprintln!("            [--jsonl]   # one JSON object per hit to stdout, silent otherwise");
             std::process::exit(if e == "help" { 0 } else { 2 });
         }
     };
@@ -201,19 +240,24 @@ async fn main() {
         None => args.url.clone(),
     };
 
-    println!("target:    {} {}", args.method, base_url);
-    println!("preset:    {}   mode: {:?}", args.preset, args.mode);
-    if let Some(q) = &args.inject_query {
-        println!("inject:    query param `{q}`");
+    // --jsonl implies silent: stdout carries only JSON lines, so the plan and
+    // human report are suppressed (a summary still goes to stderr).
+    let verbose = !args.jsonl;
+    if verbose {
+        println!("target:    {} {}", args.method, base_url);
+        println!("preset:    {}   mode: {:?}", args.preset, args.mode);
+        if let Some(q) = &args.inject_query {
+            println!("inject:    query param `{q}`");
+        }
+        if let Some(t) = &args.inject_body {
+            println!("inject:    form body `{t}`");
+        }
+        for (name, value) in &args.headers {
+            // Avoid dumping full auth/cookie values to the terminal.
+            println!("header:    {name}: {}", truncate(value, 16));
+        }
+        println!("budget:    {} probes   timeout: {}s", args.budget, args.timeout_secs);
     }
-    if let Some(t) = &args.inject_body {
-        println!("inject:    form body `{t}`");
-    }
-    for (name, value) in &args.headers {
-        // Avoid dumping full auth/cookie values to the terminal.
-        println!("header:    {name}: {}", truncate(value, 16));
-    }
-    println!("budget:    {} probes   timeout: {}s", args.budget, args.timeout_secs);
 
     let timeout = Duration::from_secs(args.timeout_secs);
     let probe = match &args.csrf_url {
@@ -226,7 +270,7 @@ async fn main() {
                 Ok(r) => r,
                 Err(e) => { eprintln!("error: bad --csrf-regex: {e}"); std::process::exit(2); }
             };
-            println!("csrf:      GET {url}  field `{}`", args.csrf_field);
+            if verbose { println!("csrf:      GET {url}  field `{}`", args.csrf_field); }
             Arc::new(HttpProbe::with_csrf(timeout, CsrfConfig {
                 url: url.clone(), field: args.csrf_field.clone(), regex,
             }))
@@ -251,11 +295,24 @@ async fn main() {
     f = f.budget(args.budget);
     if args.hunt {
         f = f.hunt();
-        println!("mode:      HUNT (recall-first — flags any response unlike baseline)");
+        if verbose { println!("mode:      HUNT (recall-first — flags any response unlike baseline)"); }
     }
 
+    // Injection descriptor for the JSONL context field.
+    let inject = match (&args.inject_body, &args.inject_query) {
+        (Some(t), _) => format!("body:{t}"),
+        (_, Some(q)) => format!("query:{q}"),
+        _ => if args.method == "POST" { "body".into() } else { "query:q".into() },
+    };
+
     match f.run().await {
-        Ok(r) => report(&r),
+        Ok(r) => {
+            if args.jsonl {
+                emit_jsonl(&r, &base_url, &args.method, &inject, &args.preset);
+            } else {
+                report(&r);
+            }
+        }
         Err(e) => { eprintln!("\nrun failed: {e}"); std::process::exit(1); }
     }
 }
