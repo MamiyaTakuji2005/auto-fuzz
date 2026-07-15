@@ -67,14 +67,25 @@ to test-harness artifacts, not the engine):
   the deliberately-noisy `SizeDelta` → both 0 → ~280/300. Targets declare
   `confirm_signatures` in TOML; `calibrate` wires them per-target.
 
-Remaining priority code changes (from the sweeps, not yet applied):
+**Tuning changes applied** (before/after via `calibrate targets.toml`, gen=0.7
+baseline; all 8 targets improved, avg +20.1 hits/1k):
 
-1. `ops_per_step`: 4 → 1 (`havoc.rs`)
-2. `replace_token` weight: 3.0 → 0.5 (`havoc.rs`)
-3. `repeat_payload` weight: 0.5 → 1.5 (`havoc.rs`)
-4. `TimeDelayClassifier.min_abs_ms`: 500 → 200 (`signal.rs`)
-5. Remove `SizeClassifier` from SSTI preset (`agent.rs`)
-6. `LengthPolicy` presets are backwards — short chains win (`atoms.rs`)
+1. ✅ `ops_per_step`: 4 → 1 (`havoc.rs`) — fewer ops stay near the seed.
+2. ✅ `replace_token` weight: 3.0 → 0.5 (`havoc.rs`) — replacing pushes off-trigger.
+3. ✅ `repeat_payload` weight: 0.5 → 1.5 (`havoc.rs`) — repetition keeps trigger intact.
+5. ✅ Remove `SizeClassifier` from SSTI preset (`agent.rs`).
+6. ✅ `LengthPolicy` presets bias short + `min_atoms=1` (`atoms.rs`); the three
+   presets that used `long()` (xss, ssti, path_traversal) switched to `short()`.
+
+**Deferred:**
+
+4. ⏸️ `TimeDelayClassifier.min_abs_ms`: 500 → 200 (`signal.rs`). Applying it
+   *halved* ssrf's hits/1k — not lost detection, but the timing re-probe
+   confirmation (`evolution.rs:354`) doubles probe cost on ssrf's deterministic
+   200ms mock delay. No target in the current suite lives in the 200–500ms band
+   to justify 200, so it buys nothing here. Revisit once a real time-based target
+   in that band exists (and consider: a definitive non-timing confirmation
+   like `LeakSignature`/`Error` should let the loop skip the timing re-probe).
 
 ## File Layout
 

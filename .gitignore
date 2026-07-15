@@ -3,6 +3,7 @@ target/
 
 # Calibration working artifacts (plots, data, scripts)
 stuff/
+calibration_results.csv
 
 # Editor / IDE
 .vscode/

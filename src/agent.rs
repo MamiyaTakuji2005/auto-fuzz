@@ -175,7 +175,7 @@ impl Preset {
                 .with(Box::new(ReflectionClassifier))
                 .with(Box::new(BodyDiffClassifier)),
             gen_ratio: 0.8, // per-class: jumps at 0.8 (902 vs 824 at 0.7)
-            length: LengthPolicy::long(),  // XSS needs long chains to hit <script>
+            length: LengthPolicy::short(), // calib: shorter chains win, even for XSS vectors
             ..Default::default()
         }
     }
@@ -186,11 +186,10 @@ impl Preset {
             seeds: payloads::SSTI_PAYLOADS.iter().map(|s| s.to_string()).collect(),
             signal_set: SignalSet::new()
                 .with(Box::new(StatusClassifier))
-                .with(Box::new(SizeClassifier::default()))
                 .with(Box::new(ReflectionClassifier))
                 .with(Box::new(ErrorClassifier::dbms_starter())),
             gen_ratio: 0.8, // per-class: peaks at 0.8 (964 hits/1k)
-            length: LengthPolicy::long(),  // long chains help template injection
+            length: LengthPolicy::short(), // calib: long() is the worst choice for SSTI
             ..Default::default()
         }
     }
@@ -218,8 +217,8 @@ impl Preset {
                 .with(Box::new(SizeClassifier::default()))
                 .with(Box::new(ReflectionClassifier))
                 .with(Box::new(BodySignatureClassifier::file_read())),
-            gen_ratio: 0.7, // similar profile to XSS, needs chain depth for ../ patterns
-            length: LengthPolicy::long(),
+            gen_ratio: 0.7, // similar profile to XSS
+            length: LengthPolicy::short(), // calib: shorter chains win for path traversal too
             ..Default::default()
         }
     }

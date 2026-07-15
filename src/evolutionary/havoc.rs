@@ -85,14 +85,14 @@ impl HavocSchedule {
     pub fn defaults() -> Self {
         Self {
             insert_token:          3.0,
-            replace_token:         3.0,
+            replace_token:         0.5, // calib: replacing tokens pushes payload off the trigger
             delete_chunk:          2.0,
             duplicate_chunk:       1.5,
             splice_suffix:         2.5,
             url_encode:            2.5,
             double_url_encode:     2.0,
             insert_boundary_value: 1.5,
-            repeat_payload:        0.5,
+            repeat_payload:        1.5, // calib: repetition keeps the trigger intact, helps hits
             wrap_delimiter:        1.0,
             reverse:               0.3,
             uppercase:             0.3,
@@ -215,7 +215,7 @@ impl HavocMutator {
         Self {
             sampler,
             corpus_payloads: Vec::new(),
-            ops_per_step: 4,
+            ops_per_step: 1, // calib: fewer ops stay near the high-signal seed (monotonic in sweeps)
             budget,
             rng: RngEngine::from_entropy(rng_mode),
             rng_mode,
@@ -229,7 +229,7 @@ impl HavocMutator {
         self
     }
 
-    /// Override how many operators to chain per step (default: 4).
+    /// Override how many operators to chain per step (default: 1).
     pub fn with_ops_per_step(mut self, n: usize) -> Self {
         self.ops_per_step = n.max(1);
         self

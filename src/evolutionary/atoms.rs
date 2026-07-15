@@ -249,9 +249,11 @@ impl LengthPolicy {
     }
 
     pub fn fixed(n: usize) -> Self  { Self::new(n, n, 1.0) }
-    pub fn short() -> Self          { Self::new(1, 6,  0.5) }
-    pub fn medium() -> Self         { Self::new(2, 12, 0.25) }
-    pub fn long() -> Self           { Self::new(4, 24, 0.1) }
+    // calib: shorter chains win monotonically, and min_atoms=1 always beats higher
+    // floors. Presets keep their short<medium<long ordering but all bias short.
+    pub fn short() -> Self          { Self::new(1, 6,  0.75) }
+    pub fn medium() -> Self         { Self::new(1, 12, 0.5) }
+    pub fn long() -> Self           { Self::new(1, 24, 0.25) }
 
     pub fn sample_count<R: Rng>(&self, rng: &mut R) -> usize {
         let mut n = self.min_atoms;
