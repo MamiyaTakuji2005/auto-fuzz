@@ -13,8 +13,15 @@ cargo test --test calibration -- --nocapture   # per-target hit rates (determini
 cargo run --example report --release     # benchmarks
 cargo run --bin calibrate --release -- targets.toml   # full calibration sweep
 cargo run --bin stress --release -- stress_targets.toml
+cargo run --bin fuzz --features http -- --preset sqli --url <URL> --inject-query <p>  # headless real-target runner
 cargo run --bin fuzz-gui --features gui --release   # GUI workbench
 ```
+
+The real HTTP transport (`HttpProbe`) lives in `src/http.rs` behind the `http`
+feature (reqwest only; `gui` builds on top of it). `fuzz` is the headless CLI
+for pointing a preset at a live URL with a probe budget; its report is
+mechanics-first (baseline, probes, every signal observed) so the request →
+baseline-diff → classify pipeline is visible even with zero confirmed hits.
 
 `tests/calibration.rs` is a deterministic regression guard: it runs every
 `targets.toml` target through the loop at fixed seeds and asserts each clears a
@@ -23,7 +30,7 @@ silent calibration regressions — a target collapsing to 0, or the ssrf timing
 re-probe halving — without a full sweep. The `calibrate` binary is for
 exploring the parameter space; this test locks in the result.
 
-Binaries (`src/bin/`): `calibrate`, `stress`, `signal_sweep`, `atom_audit`, `cap_sweep`, `havoc_ablation`, `sweep`, `fuzz-gui` (feature `gui`).
+Binaries (`src/bin/`): `calibrate`, `stress`, `signal_sweep`, `atom_audit`, `cap_sweep`, `havoc_ablation`, `sweep`, `fuzz` (feature `http`), `fuzz-gui` (feature `gui`).
 
 **fuzz-gui** is the interactive workbench — exposes all 8 presets, 4 fuzz modes, 6 injection points, request timeout, and stop-on-first-hit. Uses the `Fuzzer` builder API directly with progress reporting and cancellation.
 

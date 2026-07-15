@@ -3,64 +3,14 @@
 //! Run: `cargo run --bin fuzz-gui --features gui --release`
 
 use auto_fuzz::agent::{Fuzzer, FuzzMode, FuzzResult};
-use auto_fuzz::signals::Probe;
-use async_trait::async_trait;
+use auto_fuzz::http::HttpProbe;
 use eframe::egui;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-// ── HTTP Probe ──────────────────────────────────────────────────────────
-
-struct HttpProbe {
-    client: reqwest::Client,
-}
-
-impl HttpProbe {
-    fn new(timeout: Duration) -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(timeout)
-                .build()
-                .expect("failed to build HTTP client"),
-        }
-    }
-}
-
 const ALL_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
-
-#[async_trait]
-impl Probe for HttpProbe {
-    async fn send(&self, req: &auto_fuzz::signals::Request) -> Result<auto_fuzz::signals::signal::ProbeResponse, String> {
-        let start = Instant::now();
-        let method = match req.method.to_uppercase().as_str() {
-            "GET" => reqwest::Method::GET,
-            "POST" => reqwest::Method::POST,
-            "PUT" => reqwest::Method::PUT,
-            "PATCH" => reqwest::Method::PATCH,
-            "DELETE" => reqwest::Method::DELETE,
-            "HEAD" => reqwest::Method::HEAD,
-            "OPTIONS" => reqwest::Method::OPTIONS,
-            other => return Err(format!("unsupported method: {other}")),
-        };
-        let mut builder = self.client.request(method, &req.url);
-        for (k, v) in &req.headers {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-        if !req.body.is_empty() {
-            builder = builder.body(req.body.clone());
-        }
-        let resp = builder.send().await.map_err(|e| e.to_string())?;
-        let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(|e| e.to_string())?;
-        Ok(auto_fuzz::signals::signal::ProbeResponse {
-            status,
-            body: body.to_vec(),
-            duration: start.elapsed(),
-        })
-    }
-}
 
 // ── Preset / Mode / Injection enums for UI ──────────────────────────────
 

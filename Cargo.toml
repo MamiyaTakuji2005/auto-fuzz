@@ -31,6 +31,11 @@ path = "src/bin/fuzz-gui.rs"
 required-features = ["gui"]
 
 [[bin]]
+name = "fuzz"
+path = "src/bin/fuzz.rs"
+required-features = ["http"]
+
+[[bin]]
 name = "calibrate"
 path = "src/bin/calibrate.rs"
 
@@ -60,7 +65,10 @@ path = "src/bin/sweep.rs"
 
 [features]
 default = []
-gui = ["dep:reqwest", "dep:egui", "dep:eframe"]
+# Real HTTP transport (reqwest) — enables the `http` module + `fuzz` CLI.
+http = ["dep:reqwest"]
+# GUI workbench builds on the HTTP transport.
+gui = ["http", "dep:egui", "dep:eframe"]
 
 [profile.release]
 opt-level = "z"     # optimize for size

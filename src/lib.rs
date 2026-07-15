@@ -15,6 +15,8 @@
 pub mod agent;
 pub mod baseline;
 pub mod evolutionary;
+#[cfg(feature = "http")]
+pub mod http;
 pub mod mock_config;
 pub mod payloads;
 pub mod signals;
