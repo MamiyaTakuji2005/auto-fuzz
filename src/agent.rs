@@ -416,6 +416,9 @@ pub struct Fuzzer<P: Probe> {
     progress: Option<Arc<dyn Fn(usize, usize) + Send + Sync>>,
     /// Recall-first: bolt on the NoveltyClassifier to flag any unusual response.
     hunt: bool,
+    /// Static headers merged into every request (baseline + probes), e.g. an
+    /// auth `Cookie` or `Authorization`. Never overwrite injection-set headers.
+    extra_headers: HashMap<String, String>,
 }
 
 impl<P: Probe> Fuzzer<P> {
@@ -434,6 +437,7 @@ impl<P: Probe> Fuzzer<P> {
             stop_on_confirmation: false,
             progress: None,
             hunt: false,
+            extra_headers: HashMap::new(),
         }
     }
 
@@ -552,6 +556,16 @@ impl<P: Probe> Fuzzer<P> {
     /// a matching vuln signature. Accepts false positives to avoid misses.
     pub fn hunt(mut self) -> Self { self.hunt = true; self }
 
+    /// Add a static header sent on every request (baseline + probes) — e.g. an
+    /// auth `Cookie` or `Authorization`. Does not overwrite injection-set headers.
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.extra_headers.insert(name.to_string(), value.to_string());
+        self
+    }
+
+    /// Convenience for `header("Cookie", value)`.
+    pub fn cookie(self, value: &str) -> Self { self.header("Cookie", value) }
+
     /// Attach a progress callback. Called as `f(probes_sent, total_budget)` per probe.
     pub fn on_progress(mut self, cb: Arc<dyn Fn(usize, usize) + Send + Sync>) -> Self {
         self.progress = Some(cb);
@@ -573,7 +587,15 @@ impl<P: Probe> Fuzzer<P> {
         let injection = self.injection.clone();
         let url = self.target_url.clone();
         let method = self.method.clone();
-        let baseline_req = injection.apply(&url, &method, "");
+        let extra_headers = self.extra_headers.clone();
+        // Merge static headers without clobbering what the injection point set.
+        let merge_headers = |mut r: Request, extra: &HashMap<String, String>| -> Request {
+            for (k, v) in extra {
+                r.headers.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+            r
+        };
+        let baseline_req = merge_headers(injection.apply(&url, &method, ""), &extra_headers);
         let baseline_resp = self.probe.send(&baseline_req).await
             .map_err(|e| format!("baseline probe failed: {e}"))?;
 
@@ -588,7 +610,11 @@ impl<P: Probe> Fuzzer<P> {
             if let Some(cb) = &progress_cb {
                 cb(n, budget);
             }
-            injection.apply(&url, &method, payload)
+            let mut r = injection.apply(&url, &method, payload);
+            for (k, v) in &extra_headers {
+                r.headers.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+            r
         };
 
         // ── Table / InputsOnly: exact sweep — no corpus, no mutation, no randomness ──

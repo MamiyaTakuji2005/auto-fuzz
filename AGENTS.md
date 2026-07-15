@@ -22,6 +22,8 @@ feature (reqwest only; `gui` builds on top of it). `fuzz` is the headless CLI
 for pointing a preset at a live URL with a probe budget; its report is
 mechanics-first (baseline, probes, every signal observed) so the request →
 baseline-diff → classify pipeline is visible even with zero confirmed hits.
+`--header 'Name: Value'` (repeatable) and `--cookie 'a=b'` carry auth/session
+into every request (baseline + probes), for targets behind a login like DVWA.
 
 `tests/calibration.rs` is a deterministic regression guard: it runs every
 `targets.toml` target through the loop at fixed seeds and asserts each clears a

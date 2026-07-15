@@ -25,6 +25,8 @@ struct Args {
     timeout_secs: u64,
     mode: FuzzMode,
     hunt: bool,
+    /// Static headers merged into every request (`Name: Value`), plus `--cookie`.
+    headers: Vec<(String, String)>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -37,6 +39,7 @@ fn parse_args() -> Result<Args, String> {
     let mut timeout_secs = 15u64;
     let mut mode = FuzzMode::Evolutionary;
     let mut hunt = false;
+    let mut headers: Vec<(String, String)> = Vec::new();
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -64,6 +67,13 @@ fn parse_args() -> Result<Args, String> {
                     other => return Err(format!("unknown mode: {other}")),
                 };
             }
+            "--header" => {
+                let h = take_val(&mut i)?;
+                let (name, value) = h.split_once(':')
+                    .ok_or_else(|| format!("--header must be 'Name: Value', got: {h}"))?;
+                headers.push((name.trim().to_string(), value.trim().to_string()));
+            }
+            "--cookie" => headers.push(("Cookie".to_string(), take_val(&mut i)?)),
             "--hunt" => hunt = true,
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown flag: {other}")),
@@ -81,6 +91,7 @@ fn parse_args() -> Result<Args, String> {
         timeout_secs,
         mode,
         hunt,
+        headers,
     })
 }
 
@@ -150,6 +161,7 @@ async fn main() {
             eprintln!("usage: fuzz --preset <sqli|xss|ssti|cmdi|path|nosql|ssrf|xxe> --url <URL> \\");
             eprintln!("            [--inject-query <param> | --inject-body '<tmpl with {{{{payload}}}}>'] \\");
             eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary] [--hunt]");
+            eprintln!("            [--header 'Name: Value']... [--cookie 'a=b; c=d']");
             std::process::exit(if e == "help" { 0 } else { 2 });
         }
     };
@@ -169,6 +181,10 @@ async fn main() {
     if let Some(t) = &args.inject_body {
         println!("inject:    form body `{t}`");
     }
+    for (name, value) in &args.headers {
+        // Avoid dumping full auth/cookie values to the terminal.
+        println!("header:    {name}: {}", truncate(value, 16));
+    }
     println!("budget:    {} probes   timeout: {}s", args.budget, args.timeout_secs);
 
     let probe = Arc::new(HttpProbe::new(Duration::from_secs(args.timeout_secs)));
@@ -178,6 +194,9 @@ async fn main() {
         Err(e) => { eprintln!("error: {e}"); std::process::exit(2); }
     };
     f = f.mode(args.mode);
+    for (name, value) in &args.headers {
+        f = f.header(name, value);
+    }
     // Injection point: query param or form body (mutually exclusive; body wins).
     if let Some(t) = &args.inject_body {
         f = f.body_form(t);
