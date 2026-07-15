@@ -8,12 +8,20 @@ Evolutionary web fuzzer engine in Rust. Atom-chain generation + havoc mutation, 
 
 ```bash
 cargo check                              # type-check (fast)
-cargo test                               # run all unit tests
+cargo test                               # unit tests + calibration regression guard
+cargo test --test calibration -- --nocapture   # per-target hit rates (deterministic)
 cargo run --example report --release     # benchmarks
-cargo run --bin calibrate --release -- targets.toml   # calibration sweep
+cargo run --bin calibrate --release -- targets.toml   # full calibration sweep
 cargo run --bin stress --release -- stress_targets.toml
 cargo run --bin fuzz-gui --features gui --release   # GUI workbench
 ```
+
+`tests/calibration.rs` is a deterministic regression guard: it runs every
+`targets.toml` target through the loop at fixed seeds and asserts each clears a
+per-target hit-rate floor (and that `waf-blocked` stays at 0). It catches
+silent calibration regressions — a target collapsing to 0, or the ssrf timing
+re-probe halving — without a full sweep. The `calibrate` binary is for
+exploring the parameter space; this test locks in the result.
 
 Binaries (`src/bin/`): `calibrate`, `stress`, `signal_sweep`, `atom_audit`, `cap_sweep`, `havoc_ablation`, `sweep`, `fuzz-gui` (feature `gui`).
 
