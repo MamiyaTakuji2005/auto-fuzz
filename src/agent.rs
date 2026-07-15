@@ -15,6 +15,7 @@
 //! ```
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use url::Url;
 
@@ -410,6 +411,8 @@ pub struct Fuzzer<P: Probe> {
     request_timeout: Duration,
     additional_seeds: Vec<String>,
     stop_on_confirmation: bool,
+    /// Optional progress callback: `(probes_sent, total_budget)`. Called once per probe.
+    progress: Option<Arc<dyn Fn(usize, usize) + Send + Sync>>,
 }
 
 impl<P: Probe> Fuzzer<P> {
@@ -426,6 +429,7 @@ impl<P: Probe> Fuzzer<P> {
             request_timeout: Duration::from_secs(30),
             additional_seeds: vec![],
             stop_on_confirmation: false,
+            progress: None,
         }
     }
 
@@ -539,6 +543,12 @@ impl<P: Probe> Fuzzer<P> {
     pub fn gen_ratio(mut self, r: f32) -> Self { self.preset.gen_ratio = r.clamp(0.0, 1.0); self }
     pub fn stop_on_first_hit(mut self) -> Self { self.stop_on_confirmation = true; self }
 
+    /// Attach a progress callback. Called as `f(probes_sent, total_budget)` per probe.
+    pub fn on_progress(mut self, cb: Arc<dyn Fn(usize, usize) + Send + Sync>) -> Self {
+        self.progress = Some(cb);
+        self
+    }
+
     // ── Run ───────────────────────────────────────────────────────────
 
     pub async fn run(self) -> Result<FuzzResult, String> {
@@ -554,7 +564,15 @@ impl<P: Probe> Fuzzer<P> {
 
         let baseline_profile = BaselineProfile::capture(&baseline_resp, &self.preset.signal_set);
 
+        let budget = self.budget;
+        let progress_cb = self.progress.clone();
+        let probe_count = Arc::new(AtomicUsize::new(0));
+
         let inject = move |payload: &str| -> Request {
+            let n = probe_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(cb) = &progress_cb {
+                cb(n, budget);
+            }
             injection.apply(&url, &method, payload)
         };
 
