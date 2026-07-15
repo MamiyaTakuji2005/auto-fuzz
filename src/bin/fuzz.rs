@@ -19,6 +19,8 @@ struct Args {
     url: String,
     method: String,
     inject_query: Option<String>,
+    /// Form-encoded POST body template with `{{payload}}`, e.g. `pass={{payload}}`.
+    inject_body: Option<String>,
     budget: usize,
     timeout_secs: u64,
     mode: FuzzMode,
@@ -29,6 +31,7 @@ fn parse_args() -> Result<Args, String> {
     let mut url = None;
     let mut method = "GET".to_string();
     let mut inject_query = None;
+    let mut inject_body = None;
     let mut budget = 100usize;
     let mut timeout_secs = 15u64;
     let mut mode = FuzzMode::Evolutionary;
@@ -47,6 +50,7 @@ fn parse_args() -> Result<Args, String> {
             "--url" => url = Some(take_val(&mut i)?),
             "--method" => method = take_val(&mut i)?.to_uppercase(),
             "--inject-query" => inject_query = Some(take_val(&mut i)?),
+            "--inject-body" => inject_body = Some(take_val(&mut i)?),
             "--budget" => budget = take_val(&mut i)?.parse().map_err(|_| "budget must be a number".to_string())?,
             "--timeout" => timeout_secs = take_val(&mut i)?.parse().map_err(|_| "timeout must be a number".to_string())?,
             "--mode" => {
@@ -69,6 +73,7 @@ fn parse_args() -> Result<Args, String> {
         url: url.ok_or("--url is required")?,
         method,
         inject_query,
+        inject_body,
         budget,
         timeout_secs,
         mode,
@@ -134,9 +139,9 @@ async fn main() {
         Ok(a) => a,
         Err(e) => {
             if e != "help" { eprintln!("error: {e}\n"); }
-            eprintln!("usage: fuzz --preset <sqli|xss|ssti|cmdi|path|nosql|ssrf|xxe> \\");
-            eprintln!("            --url <URL> [--inject-query <param>] [--method GET] \\");
-            eprintln!("            [--budget 100] [--timeout 15] [--mode evolutionary]");
+            eprintln!("usage: fuzz --preset <sqli|xss|ssti|cmdi|path|nosql|ssrf|xxe> --url <URL> \\");
+            eprintln!("            [--inject-query <param> | --inject-body '<tmpl with {{{{payload}}}}>'] \\");
+            eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary]");
             std::process::exit(if e == "help" { 0 } else { 2 });
         }
     };
@@ -153,6 +158,9 @@ async fn main() {
     if let Some(q) = &args.inject_query {
         println!("inject:    query param `{q}`");
     }
+    if let Some(t) = &args.inject_body {
+        println!("inject:    form body `{t}`");
+    }
     println!("budget:    {} probes   timeout: {}s", args.budget, args.timeout_secs);
 
     let probe = Arc::new(HttpProbe::new(Duration::from_secs(args.timeout_secs)));
@@ -162,7 +170,10 @@ async fn main() {
         Err(e) => { eprintln!("error: {e}"); std::process::exit(2); }
     };
     f = f.mode(args.mode);
-    if let Some(q) = &args.inject_query {
+    // Injection point: query param or form body (mutually exclusive; body wins).
+    if let Some(t) = &args.inject_body {
+        f = f.body_form(t);
+    } else if let Some(q) = &args.inject_query {
         f = f.inject_query(q);
     }
     f = f.budget(args.budget);
