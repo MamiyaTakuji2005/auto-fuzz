@@ -157,6 +157,7 @@ struct RunRecord {
     probes_sent: usize,
     corpus_size: usize,
     baseline: String,
+    oob_skipped: usize,
     signal_counts: Vec<(String, usize)>,
     hits_detail: Vec<HitDetail>,
     error: Option<String>,
@@ -205,6 +206,8 @@ struct RunConfig {
     rng_seed: Option<u64>,
     timeout_secs: u64,
     stop_on_first_hit: bool,
+    /// Out-of-band collaborator (URL or bare host) for `{{oob}}` substitution.
+    oob: String,
 }
 
 fn launch(cfg: RunConfig) -> Runner {
@@ -284,6 +287,12 @@ fn launch(cfg: RunConfig) -> Runner {
                     // Apply stop-on-first-hit
                     if cfg.stop_on_first_hit {
                         fuzzer = fuzzer.stop_on_first_hit();
+                    }
+
+                    // Apply OOB collaborator for {{oob}} substitution (else those
+                    // payloads are skipped).
+                    if !cfg.oob.trim().is_empty() {
+                        fuzzer = fuzzer.oob(cfg.oob.trim());
                     }
 
                     let _max_probes = max_probes; // suppress unused warning
@@ -387,6 +396,7 @@ fn build_record(
         probes_sent: outcome.probes_sent,
         corpus_size: outcome.corpus_size,
         baseline: outcome.baseline.clone(),
+        oob_skipped: outcome.oob_skipped,
         signal_counts,
         hits_detail,
         error: None,
@@ -409,7 +419,7 @@ fn run_record_error(
     RunRecord {
         id, duration, target_url, preset, mode, seeds, gen_ratio, max_probes, rng_seed,
         hits: 0, confirmed: 0, probes_sent: 0, corpus_size: 0,
-        baseline: String::new(), signal_counts: vec![], hits_detail: vec![],
+        baseline: String::new(), oob_skipped: 0, signal_counts: vec![], hits_detail: vec![],
         error: Some(error),
     }
 }
@@ -430,6 +440,7 @@ struct App {
     rng_seed: u64,
     timeout_secs: u64,
     stop_on_first_hit: bool,
+    oob: String,
     runner: Option<Runner>,
     progress: Progress,
     status: String,
@@ -455,6 +466,7 @@ impl Default for App {
             rng_seed: 0,
             timeout_secs: 30,
             stop_on_first_hit: false,
+            oob: String::new(),
             runner: None,
             progress: Progress { probes: 0, total: 0 },
             status: "Ready".into(),
@@ -605,6 +617,16 @@ impl eframe::App for App {
 
                     ui.separator();
 
+                    // ── OOB collaborator ──
+                    ui.heading("OOB");
+                    ui.horizontal(|ui| {
+                        ui.label("Collaborator:");
+                        ui.add(egui::TextEdit::singleline(&mut self.oob)
+                            .hint_text("host or url for {{oob}} — blank skips OOB payloads"));
+                    });
+
+                    ui.separator();
+
                     // ── Engine ──
                     ui.heading("Engine");
                     ui.add(egui::Slider::new(&mut self.gen_ratio, 0.0..=1.0).text("gen_ratio"));
@@ -646,6 +668,7 @@ impl eframe::App for App {
                                 rng_seed: rng,
                                 timeout_secs: self.timeout_secs,
                                 stop_on_first_hit: self.stop_on_first_hit,
+                                oob: self.oob.clone(),
                             };
                             self.runner = Some(launch(cfg));
                             self.next_id += 1;
@@ -718,6 +741,9 @@ impl eframe::App for App {
                 card(ui, "Confirmed", &format!("{}", rec.confirmed));
                 if rec.corpus_size > 0 {
                     card(ui, "Corpus", &format!("{}", rec.corpus_size));
+                }
+                if rec.oob_skipped > 0 {
+                    card(ui, "OOB skipped", &format!("{}", rec.oob_skipped));
                 }
                 card(ui, "Preset", &rec.preset);
                 card(ui, "Mode", &rec.mode);
