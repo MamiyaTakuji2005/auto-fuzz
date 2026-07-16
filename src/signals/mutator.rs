@@ -106,6 +106,7 @@ impl SignalGuidedMutator {
                 },
                 Signal::BodyDiff           => (3, s.kind()),
                 Signal::Anomaly { .. }     => (2, s.kind()),
+                Signal::PrototypePollution { .. } => (5, s.kind()),
                 Signal::NoEffect           => (1, s.kind()),
             };
             if rank > best_rank { best_rank = rank; best_kind = kind; }

@@ -21,6 +21,9 @@ struct Args {
     inject_query: Option<String>,
     /// Form-encoded POST body template with `{{payload}}`, e.g. `pass={{payload}}`.
     inject_body: Option<String>,
+    /// Raw JSON body: the payload becomes the whole body with `application/json`
+    /// (for prototype pollution / NoSQLi JSON injection).
+    inject_json: bool,
     budget: usize,
     timeout_secs: u64,
     mode: FuzzMode,
@@ -47,6 +50,7 @@ fn parse_args() -> Result<Args, String> {
     let mut method = "GET".to_string();
     let mut inject_query = None;
     let mut inject_body = None;
+    let mut inject_json = false;
     let mut budget = 100usize;
     let mut timeout_secs = 15u64;
     let mut mode = FuzzMode::Evolutionary;
@@ -75,6 +79,7 @@ fn parse_args() -> Result<Args, String> {
             "--method" => method = take_val(&mut i)?.to_uppercase(),
             "--inject-query" => inject_query = Some(take_val(&mut i)?),
             "--inject-body" => inject_body = Some(take_val(&mut i)?),
+            "--inject-json" => inject_json = true,
             "--budget" => budget = take_val(&mut i)?.parse().map_err(|_| "budget must be a number".to_string())?,
             "--timeout" => timeout_secs = take_val(&mut i)?.parse().map_err(|_| "timeout must be a number".to_string())?,
             "--mode" => {
@@ -120,6 +125,7 @@ fn parse_args() -> Result<Args, String> {
         method,
         inject_query,
         inject_body,
+        inject_json,
         budget,
         timeout_secs,
         mode,
@@ -237,7 +243,7 @@ async fn main() {
         Err(e) => {
             if e != "help" { eprintln!("error: {e}\n"); }
             eprintln!("usage: fuzz --preset <sqli|xss|ssti|cmdi|path|nosql|ssrf|xxe|proto> --url <URL> \\");
-            eprintln!("            [--inject-query <param> | --inject-body '<tmpl with {{{{payload}}}}>'] \\");
+            eprintln!("            [--inject-query <param> | --inject-body '<tmpl with {{{{payload}}}}>' | --inject-json] \\");
             eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary] [--hunt]");
             eprintln!("            [--concurrency 1] [--rate-limit 0]  # concurrent probes + rate limiting");
             eprintln!("            [--oob-url <collaborator>]  # substituted into {{{{oob}}}} (OOB payloads skipped if unset)");
@@ -281,6 +287,9 @@ async fn main() {
         if let Some(t) = &args.inject_body {
             println!("inject:    form body `{t}`");
         }
+        if args.inject_json {
+            println!("inject:    raw JSON body (payload is the body; application/json)");
+        }
         for (name, value) in &args.headers {
             // Avoid dumping full auth/cookie values to the terminal.
             println!("header:    {name}: {}", truncate(value, 16));
@@ -315,8 +324,10 @@ async fn main() {
     for (name, value) in &args.headers {
         f = f.header(name, value);
     }
-    // Injection point: query param or form body (mutually exclusive; body wins).
-    if let Some(t) = &args.inject_body {
+    // Injection point (mutually exclusive; JSON body wins, then form body, then query).
+    if args.inject_json {
+        f = f.body_json("{{payload}}"); // payload IS the JSON body
+    } else if let Some(t) = &args.inject_body {
         f = f.body_form(t);
     } else if let Some(q) = &args.inject_query {
         f = f.inject_query(q);
@@ -340,10 +351,14 @@ async fn main() {
     }
 
     // Injection descriptor for the JSONL context field.
-    let inject = match (&args.inject_body, &args.inject_query) {
-        (Some(t), _) => format!("body:{t}"),
-        (_, Some(q)) => format!("query:{q}"),
-        _ => if args.method == "POST" { "body".into() } else { "query:q".into() },
+    let inject = if args.inject_json {
+        "json-body".to_string()
+    } else {
+        match (&args.inject_body, &args.inject_query) {
+            (Some(t), _) => format!("body:{t}"),
+            (_, Some(q)) => format!("query:{q}"),
+            _ => if args.method == "POST" { "body".into() } else { "query:q".into() },
+        }
     };
 
     match f.run().await {

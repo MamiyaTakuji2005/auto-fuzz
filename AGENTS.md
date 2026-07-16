@@ -47,7 +47,13 @@ exploring the parameter space; this test locks in the result.
 
 Binaries (`src/bin/`): `calibrate`, `stress`, `signal_sweep`, `atom_audit`, `cap_sweep`, `havoc_ablation`, `sweep`, `fuzz` (feature `http`), `fuzz-gui` (feature `gui`).
 
-**fuzz-gui** is the interactive workbench — exposes all 8 presets, 4 fuzz modes, 6 injection points, request timeout, and stop-on-first-hit. Uses the `Fuzzer` builder API directly with progress reporting and cancellation.
+**fuzz-gui** is the interactive workbench — exposes all 9 presets, 4 fuzz modes, 6 injection points, request timeout, an OOB collaborator field, and stop-on-first-hit. Uses the `Fuzzer` builder API directly with progress reporting and cancellation.
+
+**Prototype pollution** (`--preset proto`, JSON body via `--inject-json`) confirms
+server-side PP with detection gadgets rather than blind pollution: the `json spaces`
+gadget makes the response JSON re-indent, which `ProtoPollutionClassifier` catches
+(same content, whitespace-only diff → confirms). A successful gadget pollutes the
+live app persistently until restart — treat a PP run as invasive.
 
 **Recall-first hunt mode:** `fuzz --hunt` (or `Fuzzer::hunt()`) bolts on the
 `NoveltyClassifier` — fingerprints each response as `(status, size, words,
@@ -73,7 +79,7 @@ atoms → WeightedSampler (ChainTable) → HavocMutator → EvolutionaryLoop (si
 | `src/evolutionary/corpus.rs` | SeedCorpus with energy-bucketed power scheduling, Feedback trait, HttpFeedback |
 | `src/evolutionary/evolution.rs` | Main loop blending generation (gen_ratio) with mutation |
 | `src/evolutionary/rng.rs` | Dual-mode RNG (SmallRng for speed, ChaCha12 for replay stability) |
-| `src/signals/signal.rs` | 7 classifiers: Status, Size, Reflection, TimeDelay, BodyDiff, Error, BodySignature (per-class leak-content signatures) |
+| `src/signals/signal.rs` | classifiers: Status, Size, Reflection, TimeDelay, BodyDiff, Error, BodySignature (leak-content), Novelty (anomaly), ProtoPollution (json-spaces gadget) |
 | `src/signals/mutator.rs` | Signal-guided payload mutator (alternative to evolutionary engine) |
 | `src/baseline.rs` | BaselineProfile — null-hypothesis signal filtering + confidence scoring |
 | `src/agent.rs` | Fuzzer builder API with 9 vuln presets (SQLi, XSS, SSTI, CMDi, SSRF, path traversal, NoSQLi, XXE, prototype pollution) |

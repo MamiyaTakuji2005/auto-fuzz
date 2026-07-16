@@ -25,6 +25,7 @@ enum UiPreset {
     Nosql,
     Ssrf,
     Xxe,
+    ProtoPollution,
 }
 
 impl UiPreset {
@@ -38,6 +39,7 @@ impl UiPreset {
         UiPreset::Nosql,
         UiPreset::Ssrf,
         UiPreset::Xxe,
+        UiPreset::ProtoPollution,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -50,6 +52,7 @@ impl UiPreset {
             UiPreset::Nosql => "NoSQL Injection",
             UiPreset::Ssrf => "SSRF",
             UiPreset::Xxe => "XXE",
+            UiPreset::ProtoPollution => "Prototype Pollution",
         }
     }
     fn default_gen_ratio(self) -> f32 {
@@ -57,6 +60,7 @@ impl UiPreset {
             UiPreset::Sqli | UiPreset::Xss | UiPreset::Ssti => 0.8,
             UiPreset::Cmdi | UiPreset::PathTraversal | UiPreset::Nosql => 0.7,
             UiPreset::Ssrf | UiPreset::Xxe => 0.0,
+            UiPreset::ProtoPollution => 0.4,
             UiPreset::Custom => 0.7,
         }
     }
@@ -70,6 +74,7 @@ impl UiPreset {
             UiPreset::Nosql => "' || '1'=='1\n{ \"$ne\": null }\n$gt\n$regex",
             UiPreset::Ssrf => "http://localhost\nhttp://169.254.169.254\nhttp://127.0.0.1\nfile://",
             UiPreset::Xxe => "<!ENTITY xxe SYSTEM \"file:///etc/passwd\">\n%xxe;",
+            UiPreset::ProtoPollution => "{\"__proto__\":{\"json spaces\":10}}\n{\"__proto__\":{\"isAdmin\":true}}\n{\"constructor\":{\"prototype\":{\"polluted\":true}}}",
             UiPreset::Custom => "'\n\"\n<\n{{",
         }
     }
@@ -258,6 +263,7 @@ fn launch(cfg: RunConfig) -> Runner {
                         UiPreset::Nosql => fuzzer.nosql_injection(),
                         UiPreset::Ssrf => fuzzer.ssrf(),
                         UiPreset::Xxe => fuzzer.xxe(),
+                        UiPreset::ProtoPollution => fuzzer.prototype_pollution(),
                         UiPreset::Custom => fuzzer,
                     };
 

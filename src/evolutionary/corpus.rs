@@ -391,6 +391,7 @@ impl Feedback for HttpFeedback {
                 // recall-first (see ANOMALY.md): report it (>= min_corpus_score)
                 // but keep it low so heavy havoc doesn't chase every wobble.
                 Signal::Anomaly { .. } => 2,
+                Signal::PrototypePollution { .. } => { confirmed = true; 5 }
                 Signal::NoEffect => 0,
             };
             if rank > best_rank {

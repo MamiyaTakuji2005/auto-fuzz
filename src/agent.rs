@@ -362,18 +362,26 @@ impl Preset {
     }
 
     fn prototype_pollution() -> Self {
+        // Server-side PP is confirmed via *detection gadgets*: pollution is
+        // invisible on its own, so the corpus carries payloads whose effect
+        // shows in the response we can see. The primary one is Express's
+        // `json spaces` gadget — polluting it makes `res.json()` pretty-print,
+        // so a compact-JSON baseline vs an indented response trips SizeDelta and
+        // BodyDiff. `status` and `parameterLimit` gadgets trip StatusClassifier.
+        //
+        // Caveat (inherent to PP, not this tool): a successful gadget pollutes
+        // the live app *persistently* until it restarts — every later JSON
+        // response stays reformatted. That's real state change; treat a PP run
+        // as invasive.
         Self {
             table: Some(payloads::proto_pollution_table()),
             seeds: payloads::proto_pollution_table().payloads(),
-            // Blind PP is hard to confirm over HTTP without a probe gadget; this
-            // is a best-effort signal set (status change / error / body diff).
-            // Detection is the piece to refine next — the payload corpus is the
-            // point of adding the class now.
             signal_set: SignalSet::new()
                 .with(Box::new(StatusClassifier))
-                .with(Box::new(ErrorClassifier::dbms_starter()))
-                .with(Box::new(BodyDiffClassifier)),
-            gen_ratio: 0.5, // structured JSON — some generation, mostly havoc from seeds
+                .with(Box::new(SizeClassifier::default()))
+                .with(Box::new(BodyDiffClassifier))
+                .with(Box::new(ProtoPollutionClassifier)),
+            gen_ratio: 0.4, // structured JSON — mostly havoc over the seed gadgets
             length: LengthPolicy::short(),
             ..Default::default()
         }
@@ -1142,6 +1150,62 @@ mod tests {
         assert!(!has_oob_placeholder("' OR 1=1--"));
         // SSTI {{7*7}} must not be mistaken for an OOB token.
         assert!(!has_oob_placeholder("{{7*7}}"));
+    }
+
+    /// Simulates an Express app vulnerable to the `json spaces` PP gadget:
+    /// once a payload pollutes it, the JSON response is the SAME content but
+    /// pretty-printed (extra whitespace) — exactly what ProtoPollutionClassifier
+    /// keys on. A clean payload returns the compact baseline.
+    struct MockPPTarget;
+    #[async_trait]
+    impl Probe for MockPPTarget {
+        async fn send(&self, req: &Request) -> Result<ProbeResponse, String> {
+            let src = format!("{}{}", req.url, req.body);
+            let body: &[u8] = if src.contains("json spaces") {
+                b"{\n          \"ok\": true,\n          \"id\": 7\n}"
+            } else {
+                b"{\"ok\":true,\"id\":7}"
+            };
+            Ok(ProbeResponse { status: 200, body: body.to_vec(), duration: Duration::from_millis(1) })
+        }
+    }
+
+    #[tokio::test]
+    async fn prototype_pollution_confirms_json_spaces_gadget() {
+        let r = Fuzzer::new(Arc::new(MockPPTarget))
+            .prototype_pollution()
+            .mode(FuzzMode::Table)
+            .target("http://x/", "POST")
+            .inject_body_raw()
+            .budget(60)
+            .run().await.unwrap();
+        assert!(r.has_hits(), "json-spaces gadget must produce a confirmed PP hit");
+        assert!(
+            r.confirmed.iter().any(|h| h.signals.iter().any(|s| s == "proto_pollution")),
+            "the confirmed hit must carry the proto_pollution signal, got: {:?}",
+            r.confirmed.iter().map(|h| &h.signals).collect::<Vec<_>>()
+        );
+    }
+
+    /// A non-vulnerable app (never reformats) must not produce a PP false positive.
+    #[tokio::test]
+    async fn prototype_pollution_no_false_positive_when_static() {
+        struct StaticTarget;
+        #[async_trait]
+        impl Probe for StaticTarget {
+            async fn send(&self, _req: &Request) -> Result<ProbeResponse, String> {
+                Ok(ProbeResponse { status: 200, body: b"{\"ok\":true}".to_vec(), duration: Duration::from_millis(1) })
+            }
+        }
+        let r = Fuzzer::new(Arc::new(StaticTarget))
+            .prototype_pollution()
+            .mode(FuzzMode::Table)
+            .target("http://x/", "POST")
+            .inject_body_raw()
+            .budget(60)
+            .run().await.unwrap();
+        assert!(!r.confirmed.iter().any(|h| h.signals.iter().any(|s| s == "proto_pollution")),
+            "static app must not raise a proto_pollution confirmation");
     }
 
     /// Mock probe that returns 500 + SQL error when payload contains ' OR.

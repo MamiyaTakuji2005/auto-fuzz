@@ -76,6 +76,10 @@ pub enum Signal {
     /// recall-first novelty flag (see ANOMALY.md). Not a confirmation; a
     /// "this is different, look at it" report. `detail` names what deviated.
     Anomaly { detail: String },
+    /// A server-side prototype-pollution detection gadget fired — the response
+    /// changed in a way only pollution explains (e.g. the `json spaces` gadget
+    /// reformatting the JSON body). Confirms on its own. `gadget` names which.
+    PrototypePollution { gadget: String },
 }
 
 /// How a reflected payload appears in the response.
@@ -106,6 +110,7 @@ impl Signal {
             Signal::TimeDelay { .. } => "time_delay",
             Signal::BodyDiff => "body_diff",
             Signal::Anomaly { .. } => "anomaly",
+            Signal::PrototypePollution { .. } => "proto_pollution",
         }
     }
 }
@@ -318,6 +323,31 @@ impl Classifier for BodyDiffClassifier {
     fn classify(&self, _payload: &str, baseline: &ProbeResponse, probe: &ProbeResponse) -> Option<Signal> {
         if baseline.body.len() == probe.body.len() && baseline.body != probe.body {
             Some(Signal::BodyDiff)
+        } else {
+            None
+        }
+    }
+}
+
+/// Confirms server-side **prototype pollution** via the canonical `json spaces`
+/// detection gadget: once `res.json`'s indentation setting is polluted, the
+/// response body is the same content re-serialised with extra whitespace. So if
+/// the probe body equals the baseline body after whitespace is stripped, but the
+/// raw bytes differ and the probe is larger, only a formatting-config pollution
+/// explains it — a normal endpoint never re-indents identical content on its own.
+/// High precision (near-zero false positives), so it confirms.
+pub struct ProtoPollutionClassifier;
+impl Classifier for ProtoPollutionClassifier {
+    fn classify(&self, _payload: &str, baseline: &ProbeResponse, probe: &ProbeResponse) -> Option<Signal> {
+        // Only meaningful when both bodies carry JSON structure.
+        if !baseline.body.contains(&b'{') || probe.body.len() <= baseline.body.len() {
+            return None;
+        }
+        let strip_ws = |b: &[u8]| -> Vec<u8> {
+            b.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect()
+        };
+        if baseline.body != probe.body && strip_ws(&baseline.body) == strip_ws(&probe.body) {
+            Some(Signal::PrototypePollution { gadget: "json-spaces-reformat".to_string() })
         } else {
             None
         }
