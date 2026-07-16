@@ -70,6 +70,8 @@ Pre-built probe sets for common vulnerability classes. Use as seed corpus:
 | Exact user inputs (no mutation) | `Fuzzer::sql_injection().mode(FuzzMode::InputsOnly).seeds([...]).run().await` |
 | Cap payload length | `.with_payload_policy(PayloadPolicy::default())` |
 | Disable candidate dedup | `.with_dedup(false)` |
+| Concurrent probes | `.concurrency(8)` or `.with_max_concurrent(8)` |
+| Rate limit (req/s) | `.rate_limit(10.0)` or `.with_probe_interval(Duration::from_millis(100))` |
 
 ## Calibration notes
 

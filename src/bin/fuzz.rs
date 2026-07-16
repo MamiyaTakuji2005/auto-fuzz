@@ -33,6 +33,10 @@ struct Args {
     csrf_regex: Option<String>,
     /// Emit one JSON object per hit to stdout (implies silent — no banner/report).
     jsonl: bool,
+    /// Maximum concurrent in-flight probes (default: 1 = sequential).
+    concurrency: usize,
+    /// Rate limit in requests per second (0 = unlimited).
+    rate_limit: f32,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -50,6 +54,8 @@ fn parse_args() -> Result<Args, String> {
     let mut csrf_field = "user_token".to_string();
     let mut csrf_regex = None;
     let mut jsonl = false;
+    let mut concurrency = 1usize;
+    let mut rate_limit = 0.0f32;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -89,6 +95,15 @@ fn parse_args() -> Result<Args, String> {
             "--csrf-regex" => csrf_regex = Some(take_val(&mut i)?),
             "--jsonl" | "--json" => jsonl = true,
             "--hunt" => hunt = true,
+            "--concurrency" | "--conc" => {
+                concurrency = take_val(&mut i)?.parse()
+                    .map_err(|_| "concurrency must be a number".to_string())?;
+                if concurrency < 1 { concurrency = 1; }
+            }
+            "--rate-limit" | "--rate" => {
+                rate_limit = take_val(&mut i)?.parse()
+                    .map_err(|_| "rate-limit must be a number".to_string())?;
+            }
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown flag: {other}")),
         }
@@ -110,6 +125,8 @@ fn parse_args() -> Result<Args, String> {
         csrf_field,
         csrf_regex,
         jsonl,
+        concurrency,
+        rate_limit,
     })
 }
 
@@ -212,6 +229,7 @@ async fn main() {
             eprintln!("usage: fuzz --preset <sqli|xss|ssti|cmdi|path|nosql|ssrf|xxe> --url <URL> \\");
             eprintln!("            [--inject-query <param> | --inject-body '<tmpl with {{{{payload}}}}>'] \\");
             eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary] [--hunt]");
+            eprintln!("            [--concurrency 1] [--rate-limit 0]  # concurrent probes + rate limiting");
             eprintln!("            [--header 'Name: Value']... [--cookie 'a=b; c=d']");
             eprintln!("            [--csrf-url <URL> [--csrf-field user_token] [--csrf-regex <pat with group 1>]]");
             eprintln!("            [--jsonl]   # one JSON object per hit to stdout, silent otherwise");
@@ -293,6 +311,14 @@ async fn main() {
         f = f.inject_query(q);
     }
     f = f.budget(args.budget);
+    if args.concurrency > 1 {
+        f = f.concurrency(args.concurrency);
+        if verbose { println!("concurrency: {} in-flight probes", args.concurrency); }
+    }
+    if args.rate_limit > 0.0 {
+        f = f.rate_limit(args.rate_limit);
+        if verbose { println!("rate-limit: {:.1} req/s", args.rate_limit); }
+    }
     if args.hunt {
         f = f.hunt();
         if verbose { println!("mode:      HUNT (recall-first — flags any response unlike baseline)"); }

@@ -113,7 +113,7 @@ fn signal_set(names: &[&str]) -> SignalSet {
 
 const ALL: &[&str] = &["status","size","bodydiff","reflection","timedelay","error"];
 
-fn build_loop<P: Probe>(probe: P, probes: usize) -> EvolutionaryLoop<P> {
+fn build_loop<P: Probe + 'static>(probe: P, probes: usize) -> EvolutionaryLoop<P> {
     let s = WeightedSampler::default_weights();
     let h = HavocMutator::new(s.clone(), probes * 4);
     let c = SeedCorpus::from_seeds(["'", "<", "{{", "1 OR 1=1"]);

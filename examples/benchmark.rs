@@ -81,7 +81,7 @@ struct RunResult {
     confirmed: usize,
 }
 
-async fn run_config<P: Probe>(
+async fn run_config<P: Probe + 'static>(
     probe: P,
     probes: usize,
     gen_ratio: f32,

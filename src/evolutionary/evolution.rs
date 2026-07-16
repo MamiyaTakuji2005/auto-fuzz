@@ -24,7 +24,7 @@ use crate::evolutionary::havoc::HavocMutator;
 use crate::evolutionary::rng::{RngEngine, RngMode};
 use crate::evolutionary::corpus::{SeedCorpus, CorpusEntry, Feedback, EvaluationContext};
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use crate::signals::signal::{Signal, SignalSet, ProbeResponse};
@@ -125,9 +125,24 @@ pub struct EvolutionaryLoop<P> {
     pub rng_seed: Option<u64>,
     /// RNG backend (Small for speed, ChaCha12 for cross-platform replay).
     pub rng_mode: RngMode,
+    /// Maximum number of concurrent in-flight probes. Default 1 (sequential).
+    ///
+    /// When > 1, the loop pipelines probe submissions: candidates are still
+    /// generated one at a time using the RNG (preserving deterministic replay),
+    /// but up to this many probes can be in flight simultaneously. Results are
+    /// processed in submission order so corpus evolution stays deterministic.
+    ///
+    /// Replay note: a given seed produces the same candidate sequence only when
+    /// replayed with the same `max_concurrent`. Use 1 for bit-exact sequential
+    /// replay.
+    pub max_concurrent: usize,
+    /// Minimum interval between probe submissions (rate limiting).
+    /// `None` = no pacing (fire as fast as generation allows).
+    /// Orthogonal to `max_concurrent` — you can have 4 probes in flight at 10 req/s.
+    pub min_probe_interval: Option<std::time::Duration>,
 }
 
-impl<P: Probe> EvolutionaryLoop<P> {
+impl<P: Probe + 'static> EvolutionaryLoop<P> {
     pub fn new(
         probe: P,
         corpus: SeedCorpus,
@@ -152,6 +167,8 @@ impl<P: Probe> EvolutionaryLoop<P> {
             payload_policy: PayloadPolicy::default(),
             rng_seed: None,
             rng_mode: RngMode::Small,
+            max_concurrent: 1, // sequential by default — backward-compatible
+            min_probe_interval: None,
         }
     }
 
@@ -228,6 +245,28 @@ impl<P: Probe> EvolutionaryLoop<P> {
         self
     }
 
+    /// Set the maximum number of concurrent in-flight probes (default: 1 = sequential).
+    ///
+    /// When > 1, the loop pipelines probe submissions: candidates are still generated
+    /// one at a time using the RNG (preserving deterministic replay), but up to `n`
+    /// probes can be in flight simultaneously. Results are processed in submission
+    /// order so corpus evolution stays deterministic.
+    ///
+    /// Replay note: a given seed produces the same candidate sequence only when
+    /// replayed with the same `max_concurrent`. Use 1 for bit-exact sequential replay.
+    pub fn with_max_concurrent(mut self, n: usize) -> Self {
+        self.max_concurrent = n.max(1);
+        self
+    }
+
+    /// Set a minimum interval between probe submissions (rate limiting).
+    /// The loop sleeps as needed before each submission to enforce this pacing.
+    /// Orthogonal to `max_concurrent` — you can have 4 probes in flight at 10 req/s.
+    pub fn with_probe_interval(mut self, interval: std::time::Duration) -> Self {
+        self.min_probe_interval = Some(interval);
+        self
+    }
+
     /// Golden-ratio constant to keep loop and havoc RNG seeds independent
     /// but deterministic from a single user-provided seed.
     const HAVOC_SEED_OFFSET: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -277,6 +316,202 @@ impl<P: Probe> EvolutionaryLoop<P> {
         // Initial sync — seed the splice corpus once before the loop.
         self.havoc.update_corpus(self.corpus.all_payloads());
 
+        // ── Concurrent path (max_concurrent > 1) ──────────────────────────
+        //
+        // Sliding-window pipeline that preserves deterministic replay:
+        //   1. Generate candidates sequentially — same RNG order as W=1.
+        //   2. Submit up to `max_concurrent` probes in flight (spawned tasks).
+        //   3. Process results strictly in submission order (oldest first).
+        //   4. Corpus evolves during result processing, in order.
+        //
+        // The first `max_concurrent` candidates are generated "ahead" without
+        // feedback (lookahead window). This is deterministic with a fixed
+        // window size — same seed + same max_concurrent = same sequence.
+        // Use max_concurrent=1 for bit-exact sequential replay.
+        if self.max_concurrent > 1 {
+            let probe = std::sync::Arc::new(self.probe);
+
+            // (candidate, request, parent_idx, spawned task handle)
+            type ProbeTask = tokio::task::JoinHandle<
+                Result<Result<ProbeResponse, String>, tokio::time::error::Elapsed>,
+            >;
+            let mut in_flight: VecDeque<(String, Request, usize, ProbeTask)> =
+                VecDeque::new();
+            let mut last_submit: Option<std::time::Instant> = None;
+
+            while probes_sent < self.max_probes || !in_flight.is_empty() {
+                // ── Fill the window ──────────────────────────────────────
+                while in_flight.len() < self.max_concurrent
+                    && probes_sent < self.max_probes
+                {
+                    let Some(parent_idx) = self.corpus.schedule(&mut rng)
+                        else { break };
+                    if last_parent != Some(parent_idx) {
+                        tried.clear();
+                        last_parent = Some(parent_idx);
+                    }
+                    let seed_payload =
+                        self.corpus.entry(parent_idx).unwrap().payload.clone();
+
+                    const MAX_NOOP_RETRIES: usize = 3;
+                    let mut candidate = String::new();
+                    for retry in 0..=MAX_NOOP_RETRIES {
+                        candidate = if rng.gen::<f32>() < self.gen_ratio {
+                            self.sampler.apply_chain(&seed_payload, &mut rng)
+                        } else {
+                            self.havoc.mutate(&seed_payload)
+                        };
+                        if candidate == seed_payload {
+                            mutation_noops += 1;
+                            if retry < MAX_NOOP_RETRIES { continue; }
+                        }
+                        break;
+                    }
+
+                    if self.dedup_candidates {
+                        let mut hasher = DefaultHasher::new();
+                        candidate.hash(&mut hasher);
+                        if !tried.insert(hasher.finish()) {
+                            duplicates_skipped += 1;
+                            continue;
+                        }
+                    }
+
+                    if self.payload_policy.reject_oversized
+                        && candidate.len() > self.payload_policy.max_len
+                    {
+                        oversized_skipped += 1;
+                        continue;
+                    }
+
+                    // Rate limit: enforce minimum interval between submissions.
+                    if let Some(interval) = self.min_probe_interval {
+                        if let Some(last) = last_submit {
+                            let elapsed = last.elapsed();
+                            if elapsed < interval {
+                                tokio::time::sleep(interval - elapsed).await;
+                            }
+                        }
+                        last_submit = Some(std::time::Instant::now());
+                    }
+
+                    // Submit probe — spawned task runs concurrently.
+                    let req = inject(&candidate);
+                    let probe_clone = probe.clone();
+                    let req_clone = req.clone();
+                    let timeout = self.request_timeout;
+                    let handle = tokio::spawn(async move {
+                        tokio::time::timeout(
+                            timeout, probe_clone.send(&req_clone),
+                        ).await
+                    });
+                    in_flight.push_back((candidate, req, parent_idx, handle));
+                    probes_sent += 1;
+                }
+
+                // ── Process oldest result (ordered completion) ───────────
+                let Some((candidate, req, parent_idx, handle)) =
+                    in_flight.pop_front()
+                else { break };
+
+                let resp = match handle.await {
+                    Ok(Ok(Ok(r)))  => r,
+                    Ok(Ok(Err(_))) => { probe_errors += 1; continue; }
+                    Ok(Err(_))     => { timeouts += 1;     continue; }
+                    Err(_)         => { probe_errors += 1; continue; }
+                };
+
+                let raw_signals =
+                    self.signal_set.run(&candidate, &baseline, &resp);
+                let signals = baseline_profile.filter(&raw_signals);
+
+                let ctx = EvaluationContext {
+                    payload: &candidate,
+                    request: &req,
+                    baseline: &baseline,
+                    response: &resp,
+                    probe_error: None,
+                    raw_signals: &raw_signals,
+                    filtered_signals: &signals,
+                };
+                let eval = self.feedback.evaluate(&ctx);
+
+                // Timing re-probe (synchronous — one-off verification).
+                let timing_confirmed = eval.confirmed
+                    && matches!(eval.best_signal, Signal::TimeDelay { .. });
+                let actually_confirmed =
+                    if timing_confirmed && probes_sent < self.max_probes {
+                        let req2 = inject(&candidate);
+                        let probe_clone = probe.clone();
+                        match tokio::time::timeout(
+                            self.request_timeout, probe_clone.send(&req2),
+                        ).await {
+                            Ok(Ok(resp2)) => {
+                                probes_sent += 1;
+                                let raw2 = self.signal_set.run(
+                                    &candidate, &baseline, &resp2);
+                                let sigs2 = baseline_profile.filter(&raw2);
+                                sigs2.iter().any(|s| matches!(
+                                    s, Signal::TimeDelay { .. }
+                                ))
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        eval.confirmed
+                    };
+
+                // Corpus evolution — only filtered signals affect decisions.
+                if eval.interesting {
+                    let entry = CorpusEntry::discovered(
+                        candidate.clone(), eval.best_signal, eval.score,
+                        parent_idx);
+                    let prev_len = self.corpus.len();
+                    self.corpus.push_discovered(entry);
+                    if self.corpus.len() > prev_len {
+                        self.havoc.push_corpus_payload(candidate.clone());
+                    }
+                    self.corpus.boost_energy(parent_idx, eval.score);
+
+                    let filtered_kinds: std::collections::HashSet<&str> =
+                        signals.iter().map(|s| s.kind()).collect();
+                    let ambient: Vec<Signal> = raw_signals
+                        .into_iter()
+                        .filter(|s| !filtered_kinds.contains(s.kind()))
+                        .collect();
+
+                    let hit = EvolutionaryHit {
+                        payload: candidate,
+                        signals,
+                        ambient,
+                        score: eval.score,
+                        parent_idx,
+                        confirmed: actually_confirmed,
+                    };
+                    if actually_confirmed { hits.push(hit.clone()); }
+                    interesting.push(hit);
+
+                    if actually_confirmed && self.stop_on_confirmation {
+                        break;
+                    }
+                }
+            }
+
+            return Ok(EvolutionaryOutcome {
+                hits,
+                interesting,
+                probes_sent,
+                final_corpus_size: self.corpus.len(),
+                baseline_profile,
+                probe_errors,
+                timeouts,
+                duplicate_candidates_skipped: duplicates_skipped,
+                oversized_candidates_skipped: oversized_skipped,
+                mutation_noops,
+            });
+        }
+
+        // ── Sequential path (max_concurrent == 1) ──────────────────────────
         while probes_sent < self.max_probes {
             // Power schedule: pick corpus entry weighted by energy.
             let Some(parent_idx) = self.corpus.schedule(&mut rng) else { break };
@@ -319,6 +554,11 @@ impl<P: Probe> EvolutionaryLoop<P> {
             if self.payload_policy.reject_oversized && candidate.len() > self.payload_policy.max_len {
                 oversized_skipped += 1;
                 continue;
+            }
+
+            // Rate limit: enforce minimum interval between submissions.
+            if let Some(interval) = self.min_probe_interval {
+                tokio::time::sleep(interval).await;
             }
 
             // Probe.
@@ -722,5 +962,139 @@ mod tests {
         }).await.unwrap();
         assert!(out.has_confirmed());
         assert_eq!(out.probes_sent, 1, "stop_on_first_hit should exit after 1 probe, got {}", out.probes_sent);
+    }
+
+    // ── Concurrent path tests ────────────────────────────────────────────
+    //
+    // The sliding-window pipeline (max_concurrent > 1) uses tokio::spawn.
+    // The FIFO MockProbe is non-deterministic under spawn because task
+    // completion order varies. These tests use a content-addressed probe
+    // (same payload → same response regardless of timing) so the determinism
+    // guarantee can be verified.
+
+    /// Content-addressed mock: returns SQL error when payload contains the
+    /// trigger substring, 200 "ok" otherwise. Response depends on payload
+    /// content, not call order.
+    struct ContentProbe { trigger: &'static str }
+
+    #[async_trait]
+    impl Probe for ContentProbe {
+        async fn send(&self, req: &Request) -> Result<ProbeResponse, String> {
+            let payload = req.url.split("?q=").nth(1).unwrap_or("");
+            if payload.contains(self.trigger) {
+                Ok(resp(500, "You have an error in your SQL syntax near", 5))
+            } else {
+                Ok(resp(200, "ok", 5))
+            }
+        }
+    }
+
+    fn concurrent_loop(concurrency: usize, seed: u64) -> EvolutionaryLoop<ContentProbe> {
+        let sampler = WeightedSampler::default_weights();
+        let havoc = HavocMutator::new(
+            WeightedSampler::default_weights(), 200)
+            .with_seed(seed.wrapping_add(0x9E37_79B9_7F4A_7C15));
+        let corpus = SeedCorpus::from_seeds(["'", "<", "{{"]);
+        let fb = Box::new(HttpFeedback::default());
+        EvolutionaryLoop::new(ContentProbe { trigger: "'" }, corpus, sampler, havoc, fb)
+            .with_gen_ratio(0.5)
+            .with_max_probes(20)
+            .with_seed(seed)
+            .with_max_concurrent(concurrency)
+    }
+
+    #[tokio::test]
+    async fn concurrent_path_confirms_hits() {
+        let lp = concurrent_loop(4, 42);
+        let out = lp.run(&base_req(), |p| Request {
+            url: format!("http://x.com/?q={p}"), method: "GET".into(),
+            headers: HashMap::new(), body: String::new(),
+        }).await.unwrap();
+        assert!(out.has_confirmed(), "concurrent path should confirm SQLi hits");
+        assert!(out.probes_sent > 0, "should have sent probes");
+    }
+
+    #[tokio::test]
+    async fn concurrent_replay_same_seed_same_sequence() {
+        let mut sequences: Vec<Vec<String>> = Vec::new();
+        for _ in 0..2 {
+            let lp = concurrent_loop(4, 0xCAFE_BABE);
+            let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+            let seen_clone = std::sync::Arc::clone(&seen);
+            lp.run(&base_req(), move |p| {
+                seen_clone.lock().unwrap().push(p.to_string());
+                Request { url: format!("http://x.com/?q={p}"), method: "GET".into(),
+                          headers: HashMap::new(), body: String::new() }
+            }).await.unwrap();
+            sequences.push(seen.lock().unwrap().clone());
+        }
+        assert_eq!(sequences[0], sequences[1],
+            "same seed + same max_concurrent must produce identical probe sequences");
+        assert!(!sequences[0].is_empty(), "should have sent probes");
+    }
+
+    /// Determinism under real parallelism (multi-threaded runtime).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_replay_deterministic_multithread() {
+        let mut sequences: Vec<Vec<String>> = Vec::new();
+        for _ in 0..3 {
+            let lp = concurrent_loop(4, 0xBEEF);
+            let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+            let seen_clone = std::sync::Arc::clone(&seen);
+            lp.run(&base_req(), move |p| {
+                seen_clone.lock().unwrap().push(p.to_string());
+                Request { url: format!("http://x.com/?q={p}"), method: "GET".into(),
+                          headers: HashMap::new(), body: String::new() }
+            }).await.unwrap();
+            sequences.push(seen.lock().unwrap().clone());
+        }
+        assert_eq!(sequences[0], sequences[1],
+            "multi-threaded: runs 1 and 2 must match");
+        assert_eq!(sequences[1], sequences[2],
+            "multi-threaded: runs 2 and 3 must match");
+        assert!(!sequences[0].is_empty());
+    }
+
+    /// Different concurrency levels with the same seed produce DIFFERENT
+    /// sequences (the lookahead window changes corpus evolution timing).
+    /// This is expected — replay requires the same concurrency level.
+    #[tokio::test]
+    async fn different_concurrency_different_sequence() {
+        let run_with_concurrency = |concurrency: usize| {
+            let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+            let seen_clone = std::sync::Arc::clone(&seen);
+            async move {
+                let lp = concurrent_loop(concurrency, 42);
+                lp.run(&base_req(), move |p| {
+                    seen_clone.lock().unwrap().push(p.to_string());
+                    Request { url: format!("http://x.com/?q={p}"), method: "GET".into(),
+                              headers: HashMap::new(), body: String::new() }
+                }).await.unwrap();
+                seen.lock().unwrap().clone()
+            }
+        };
+        let seq_w1 = run_with_concurrency(1).await;
+        let seq_w4 = run_with_concurrency(4).await;
+        assert_ne!(seq_w1, seq_w4,
+            "W=1 and W=4 with same seed should produce different sequences \
+             (lookahead changes corpus evolution timing)");
+    }
+
+    /// Rate limiting: probe interval should slow submissions.
+    #[tokio::test]
+    async fn rate_limit_paces_submissions() {
+        let lp = concurrent_loop(1, 42)
+            .with_probe_interval(std::time::Duration::from_millis(50));
+        let start = std::time::Instant::now();
+        let out = lp.run(&base_req(), |p| Request {
+            url: format!("http://x.com/?q={p}"), method: "GET".into(),
+            headers: HashMap::new(), body: String::new(),
+        }).await.unwrap();
+        let elapsed = start.elapsed();
+        // 20 probes at 50ms interval = ~1000ms minimum (minus the last probe's wait).
+        assert!(elapsed.as_millis() >= 800,
+            "rate-limited run should take >= 800ms for 20 probes at 50ms, got {}ms",
+            elapsed.as_millis());
+        assert!(out.probes_sent > 0);
     }
 }

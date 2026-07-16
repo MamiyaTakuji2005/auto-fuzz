@@ -14,6 +14,7 @@ cargo run --example report --release     # benchmarks
 cargo run --bin calibrate --release -- targets.toml   # full calibration sweep
 cargo run --bin stress --release -- stress_targets.toml
 cargo run --bin fuzz --features http -- --preset sqli --url <URL> --inject-query <p>  # headless real-target runner
+cargo run --bin fuzz --features http -- --preset sqli --url <URL> --inject-query <p> --concurrency 4 --rate-limit 10  # concurrent + rate-limited
 cargo run --bin fuzz-gui --features gui --release   # GUI workbench
 ```
 
@@ -84,6 +85,7 @@ atoms → WeightedSampler (ChainTable) → HavocMutator → EvolutionaryLoop (si
 
 - Release profile: `opt-level = "z"`, LTO, single codegen unit, stripped symbols (size-optimized).
 - Deterministic replay: use `RngMode::ChaCha12` + fixed seed.
+- Concurrency replay: same seed + same `max_concurrent` = same candidate sequence. Use `max_concurrent=1` for bit-exact sequential replay.
 - Mock targets defined in TOML (`targets.toml`, `stress_targets.toml`, `nums_targets.toml`).
 - Calibration data/plots/scripts live in `stuff/` (gitignored).
 

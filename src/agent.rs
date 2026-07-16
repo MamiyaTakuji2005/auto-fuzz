@@ -27,6 +27,85 @@ use crate::signals::{Probe, Request, ProbeResponse};
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// Run a fixed, ordered list of items through `probe` with bounded concurrency
+/// and optional rate limiting. Probes are pipelined — up to `max_concurrent`
+/// in flight — but results are handed to `process` strictly in submission
+/// order, so a sweep's output is independent of completion timing (it stays
+/// deterministic). `process` receives the item, the request that was sent, and
+/// the response (`None` on transport error / timeout); it returns `true` to
+/// stop early (stop-on-confirmation), after which remaining in-flight probes
+/// are dropped. Returns the number of probes submitted.
+///
+/// This is the table/inputs-sweep analogue of the evolutionary loop's window
+/// pipeline. The sweep has no corpus feedback, so submission order is fixed up
+/// front and ordered result processing alone gives determinism — there is no
+/// shared RNG to serialize.
+async fn run_sweep_concurrent<P, T, F, G>(
+    probe: Arc<P>,
+    items: Vec<T>,
+    req_for: F,
+    timeout: Duration,
+    max_concurrent: usize,
+    probe_interval: Option<Duration>,
+    mut process: G,
+) -> usize
+where
+    P: Probe + 'static,
+    F: Fn(&T) -> Request,
+    G: FnMut(T, Request, Option<ProbeResponse>) -> bool,
+{
+    use std::collections::VecDeque;
+    use std::time::Instant;
+    type Task = tokio::task::JoinHandle<
+        Result<Result<ProbeResponse, String>, tokio::time::error::Elapsed>,
+    >;
+
+    let window = max_concurrent.max(1);
+    let mut in_flight: VecDeque<(T, Request, Task)> = VecDeque::new();
+    let mut iter = items.into_iter();
+    let mut last_submit: Option<Instant> = None;
+    let mut probes_sent = 0usize;
+
+    loop {
+        // Fill the window.
+        while in_flight.len() < window {
+            let Some(item) = iter.next() else { break };
+
+            // Rate limit: pace submissions to the minimum interval.
+            if let Some(interval) = probe_interval {
+                if let Some(last) = last_submit {
+                    let elapsed = last.elapsed();
+                    if elapsed < interval {
+                        tokio::time::sleep(interval - elapsed).await;
+                    }
+                }
+                last_submit = Some(Instant::now());
+            }
+
+            let req = req_for(&item);
+            let probe_clone = probe.clone();
+            let req_send = req.clone();
+            let handle = tokio::spawn(async move {
+                tokio::time::timeout(timeout, probe_clone.send(&req_send)).await
+            });
+            probes_sent += 1;
+            in_flight.push_back((item, req, handle));
+        }
+
+        // Process the oldest in-flight probe (submission order).
+        let Some((item, req, handle)) = in_flight.pop_front() else { break };
+        let outcome = match handle.await {
+            Ok(Ok(Ok(r))) => Some(r),
+            _ => None, // transport error, timeout, or join error
+        };
+        if process(item, req, outcome) {
+            break; // stop-on-confirmation: drop remaining in-flight probes
+        }
+    }
+
+    probes_sent
+}
+
 // ── Arc blanket impl for Probe ──────────────────────────────────────────
 
 #[async_trait]
@@ -419,9 +498,13 @@ pub struct Fuzzer<P: Probe> {
     /// Static headers merged into every request (baseline + probes), e.g. an
     /// auth `Cookie` or `Authorization`. Never overwrite injection-set headers.
     extra_headers: HashMap<String, String>,
+    /// Maximum concurrent in-flight probes (1 = sequential, backward-compatible).
+    max_concurrent: usize,
+    /// Minimum interval between probe submissions (rate limiting).
+    probe_interval: Option<Duration>,
 }
 
-impl<P: Probe> Fuzzer<P> {
+impl<P: Probe + 'static> Fuzzer<P> {
     pub fn new(probe: Arc<P>) -> Self {
         Self {
             probe,
@@ -438,6 +521,8 @@ impl<P: Probe> Fuzzer<P> {
             progress: None,
             hunt: false,
             extra_headers: HashMap::new(),
+            max_concurrent: 1,
+            probe_interval: None,
         }
     }
 
@@ -572,6 +657,36 @@ impl<P: Probe> Fuzzer<P> {
         self
     }
 
+    /// Set the maximum number of concurrent in-flight probes (default: 1 = sequential).
+    ///
+    /// When > 1, probes are pipelined: candidates are generated sequentially
+    /// (deterministic), but up to `n` probes are in flight simultaneously.
+    /// Results are processed in submission order to keep corpus evolution
+    /// deterministic.
+    ///
+    /// Replay note: same seed + same concurrency = same sequence.
+    /// Use 1 for bit-exact sequential replay.
+    pub fn concurrency(mut self, n: usize) -> Self {
+        self.max_concurrent = n.max(1);
+        self
+    }
+
+    /// Set a rate limit in requests per second. The loop paces probe submissions
+    /// to stay at or below this rate. Orthogonal to concurrency.
+    pub fn rate_limit(mut self, req_per_sec: f32) -> Self {
+        if req_per_sec > 0.0 {
+            let ms = (1000.0 / req_per_sec) as u64;
+            self.probe_interval = Some(Duration::from_millis(ms));
+        }
+        self
+    }
+
+    /// Set an explicit delay between probe submissions (alternative to `rate_limit`).
+    pub fn probe_interval(mut self, interval: Duration) -> Self {
+        self.probe_interval = Some(interval);
+        self
+    }
+
     // ── Run ───────────────────────────────────────────────────────────
 
     pub async fn run(mut self) -> Result<FuzzResult, String> {
@@ -638,68 +753,76 @@ impl<P: Probe> Fuzzer<P> {
 
             let signal_set = &self.preset.signal_set;
             let feedback = &*self.preset.feedback;
-            let budget = self.budget.min(entries.len());
+            let sweep_budget = self.budget.min(entries.len());
+            let items: Vec<(String, PayloadSource)> =
+                entries.into_iter().take(sweep_budget).collect();
+
             let mut hits: Vec<Hit> = Vec::new();
             let mut interesting: Vec<Hit> = Vec::new();
-            let mut probes_sent = 0usize;
+            let stop_on_confirmation = self.stop_on_confirmation;
 
-            for (payload, source) in entries.into_iter().take(budget) {
-                let req = inject(&payload);
-                let resp = match tokio::time::timeout(
-                    self.request_timeout, probe.send(&req)).await
-                {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(_)) => { probes_sent += 1; continue; }
-                    Err(_)     => { probes_sent += 1; continue; }
-                };
-                probes_sent += 1;
+            // Concurrent, order-preserving sweep — honours --concurrency and
+            // --rate-limit just like the evolutionary path.
+            let probes_sent = run_sweep_concurrent(
+                probe.clone(),
+                items,
+                |item: &(String, PayloadSource)| inject(&item.0),
+                self.request_timeout,
+                self.max_concurrent,
+                self.probe_interval,
+                |(payload, source): (String, PayloadSource),
+                 req: Request,
+                 outcome: Option<ProbeResponse>| {
+                    let Some(resp) = outcome else { return false };
 
-                // Classify — then filter through baseline profile.
-                let raw_signals = signal_set.run(&payload, &baseline_resp, &resp);
-                let signals = baseline_profile.filter(&raw_signals);
+                    // Classify — then filter through baseline profile.
+                    let raw_signals = signal_set.run(&payload, &baseline_resp, &resp);
+                    let signals = baseline_profile.filter(&raw_signals);
 
-                // Full context for feedback.
-                let ctx = EvaluationContext {
-                    payload: &payload,
-                    request: &req,
-                    baseline: &baseline_resp,
-                    response: &resp,
-                    probe_error: None,
-                    raw_signals: &raw_signals,
-                    filtered_signals: &signals,
-                };
-                let eval = feedback.evaluate(&ctx);
-
-                if eval.interesting {
-                    let filtered_kinds: std::collections::HashSet<&str> =
-                        signals.iter().map(|s| s.kind()).collect();
-                    let ambient: Vec<Signal> = raw_signals
-                        .into_iter()
-                        .filter(|s| !filtered_kinds.contains(s.kind()))
-                        .collect();
-
-                    let confidence = baseline_profile.confidence();
-                    let hit = Hit {
-                        payload,
-                        raw_score: eval.score,
-                        confidence,
-                        adjusted_score: eval.score as f32 * confidence,
-                        confirmed: eval.confirmed && confidence > 0.3,
-                        signals: signals.iter().map(|s| s.kind().to_string()).collect(),
-                        suppressed: ambient.iter().map(|s| s.kind().to_string()).collect(),
-                        source,
+                    let ctx = EvaluationContext {
+                        payload: &payload,
+                        request: &req,
+                        baseline: &baseline_resp,
+                        response: &resp,
+                        probe_error: None,
+                        raw_signals: &raw_signals,
+                        filtered_signals: &signals,
                     };
+                    let eval = feedback.evaluate(&ctx);
 
-                    if hit.confirmed {
-                        hits.push(hit.clone());
-                    }
-                    interesting.push(hit);
+                    if eval.interesting {
+                        let filtered_kinds: std::collections::HashSet<&str> =
+                            signals.iter().map(|s| s.kind()).collect();
+                        let ambient: Vec<Signal> = raw_signals
+                            .into_iter()
+                            .filter(|s| !filtered_kinds.contains(s.kind()))
+                            .collect();
 
-                    if eval.confirmed && self.stop_on_confirmation {
-                        break;
+                        let confidence = baseline_profile.confidence();
+                        let hit = Hit {
+                            payload,
+                            raw_score: eval.score,
+                            confidence,
+                            adjusted_score: eval.score as f32 * confidence,
+                            confirmed: eval.confirmed && confidence > 0.3,
+                            signals: signals.iter().map(|s| s.kind().to_string()).collect(),
+                            suppressed: ambient.iter().map(|s| s.kind().to_string()).collect(),
+                            source,
+                        };
+
+                        if hit.confirmed {
+                            hits.push(hit.clone());
+                        }
+                        interesting.push(hit);
+
+                        // Stop-on-confirmation: halt the sweep.
+                        if eval.confirmed && stop_on_confirmation {
+                            return true;
+                        }
                     }
-                }
-            }
+                    false
+                },
+            ).await;
 
             return Ok(FuzzResult {
                 confirmed: hits,
@@ -719,19 +842,32 @@ impl<P: Probe> Fuzzer<P> {
             let signal_set = &self.preset.signal_set;
             let feedback = &*self.preset.feedback;
             let sweep_budget = self.budget.min(entries.len());
-            for payload in entries.into_iter().take(sweep_budget) {
-                let req = inject(&payload);
-                let resp = match tokio::time::timeout(self.request_timeout, probe.send(&req)).await {
-                    Ok(Ok(r)) => r,
-                    _ => continue,
-                };
-                let raw = signal_set.run(&payload, &baseline_resp, &resp);
-                let sigs = baseline_profile.filter(&raw);
-                let ctx = EvaluationContext { payload: &payload, request: &req, baseline: &baseline_resp, response: &resp, probe_error: None, raw_signals: &raw, filtered_signals: &sigs };
-                if feedback.evaluate(&ctx).interesting {
-                    extra_seeds.push(payload);
-                }
-            }
+            let items: Vec<String> = entries.into_iter().take(sweep_budget).collect();
+
+            // Concurrent, order-preserving prefix sweep (honours --concurrency
+            // and --rate-limit); collects interesting payloads as extra seeds.
+            run_sweep_concurrent(
+                probe.clone(),
+                items,
+                |payload: &String| inject(payload),
+                self.request_timeout,
+                self.max_concurrent,
+                self.probe_interval,
+                |payload: String, req: Request, outcome: Option<ProbeResponse>| {
+                    let Some(resp) = outcome else { return false };
+                    let raw = signal_set.run(&payload, &baseline_resp, &resp);
+                    let sigs = baseline_profile.filter(&raw);
+                    let ctx = EvaluationContext {
+                        payload: &payload, request: &req, baseline: &baseline_resp,
+                        response: &resp, probe_error: None,
+                        raw_signals: &raw, filtered_signals: &sigs,
+                    };
+                    if feedback.evaluate(&ctx).interesting {
+                        extra_seeds.push(payload);
+                    }
+                    false
+                },
+            ).await;
         }
 
         // ── Evolutionary path (TableThenEvolutionary, Evolutionary) ──
@@ -760,7 +896,12 @@ impl<P: Probe> Fuzzer<P> {
         .with_gen_ratio(self.preset.gen_ratio)
         .with_max_probes(self.budget)
         .with_signal_set(self.preset.signal_set)
-        .with_request_timeout(self.request_timeout);
+        .with_request_timeout(self.request_timeout)
+        .with_max_concurrent(self.max_concurrent);
+
+        if let Some(interval) = self.probe_interval {
+            loop_ = loop_.with_probe_interval(interval);
+        }
 
         if self.stop_on_confirmation { loop_ = loop_.stop_on_first_hit(); }
         if let Some(s) = self.replay_seed { loop_ = loop_.with_seed(s); }
@@ -878,6 +1019,69 @@ mod tests {
         }
     }
 
+    /// Concurrency must not change table-sweep results. With content-addressed
+    /// responses and no corpus feedback, a windowed sweep yields the *same*
+    /// confirmed/interesting hits, in the same order, as a sequential run —
+    /// proving the pipeline neither drops nor reorders results.
+    #[tokio::test]
+    async fn table_mode_concurrent_matches_sequential() {
+        let probe = Arc::new(MockSqlTarget);
+
+        async fn run_at(probe: Arc<MockSqlTarget>, conc: usize) -> FuzzResult {
+            Fuzzer::new(probe)
+                .sql_injection()
+                .mode(FuzzMode::Table)
+                .target("http://x/?q=", "GET")
+                .inject_query("q")
+                .budget(68)
+                .concurrency(conc)
+                .run()
+                .await
+                .unwrap()
+        }
+
+        let seq = run_at(probe.clone(), 1).await;
+        let conc = run_at(probe.clone(), 8).await;
+
+        assert_eq!(seq.probes_sent, conc.probes_sent, "probes_sent differs");
+        assert_eq!(seq.confirmed.len(), conc.confirmed.len(), "confirmed count differs");
+        assert!(!conc.confirmed.is_empty(), "expected some confirmed SQLi hits");
+        for (i, (a, b)) in seq.confirmed.iter().zip(conc.confirmed.iter()).enumerate() {
+            assert_eq!(a.payload, b.payload, "confirmed[{i}] payload differs (reordered/dropped)");
+            assert_eq!(a.signals, b.signals, "confirmed[{i}] signals differ");
+        }
+        for (i, (a, b)) in seq.interesting.iter().zip(conc.interesting.iter()).enumerate() {
+            assert_eq!(a.payload, b.payload, "interesting[{i}] payload differs");
+        }
+    }
+
+    /// Determinism of the concurrent table sweep under real parallelism.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn table_mode_concurrent_deterministic_multithread() {
+        let probe = Arc::new(MockSqlTarget);
+
+        async fn confirmed_payloads(probe: Arc<MockSqlTarget>) -> Vec<String> {
+            let r = Fuzzer::new(probe)
+                .sql_injection()
+                .mode(FuzzMode::Table)
+                .target("http://x/?q=", "GET")
+                .inject_query("q")
+                .budget(68)
+                .concurrency(8)
+                .run()
+                .await
+                .unwrap();
+            r.confirmed.into_iter().map(|h| h.payload).collect()
+        }
+
+        let a = confirmed_payloads(probe.clone()).await;
+        let b = confirmed_payloads(probe.clone()).await;
+        let c = confirmed_payloads(probe.clone()).await;
+        assert_eq!(a, b, "multi-thread run 1 vs 2 diverged");
+        assert_eq!(b, c, "multi-thread run 2 vs 3 diverged");
+        assert!(!a.is_empty());
+    }
+
     #[tokio::test]
     async fn table_mode_replay_matches_across_seeds() {
         let probe = Arc::new(MockSqlTarget);
@@ -935,13 +1139,14 @@ mod tests {
             .unwrap();
 
         let seen = order_clone.seen.lock().unwrap();
-        // First 5 SQLI_PAYLOADS: "'", "\"", "' OR '1'='1", "\" OR \"1\"=\"1", "' OR 1=1--"
-        assert_eq!(seen.len(), 6, "should send exactly 5 payloads (budget + baseline)");
-        assert_eq!(seen[1], "'", "baseline + first payload should be exact table entry");
-        assert_eq!(seen[2], "\"", "second payload should be exact table entry");
-        assert_eq!(seen[3], "' OR '1'='1", "third payload should be exact table entry");
-        assert_eq!(seen[4], "\" OR \"1\"=\"1", "fourth payload should be exact table entry");
-        assert_eq!(seen[5], "' OR 1=1--", "fifth payload should be exact table entry");
+        // Table mode must send the exact table entries in order, unmutated —
+        // asserted against the live table so it survives corpus changes.
+        let table = payloads::sqli_table().payloads();
+        assert_eq!(seen.len(), 6, "should send baseline + exactly 5 payloads");
+        assert_eq!(seen[0], "", "seen[0] is the empty-payload baseline");
+        for i in 0..5 {
+            assert_eq!(seen[i + 1], table[i], "payload {i} should be the exact table entry, unmutated");
+        }
 
         assert_eq!(result.corpus_size, 0, "table mode should have no corpus");
         assert_eq!(result.probes_sent, 5, "probes_sent should match budget");
