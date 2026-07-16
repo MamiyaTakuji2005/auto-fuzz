@@ -69,7 +69,7 @@ atoms → WeightedSampler (ChainTable) → HavocMutator → EvolutionaryLoop (si
 | `src/signals/mutator.rs` | Signal-guided payload mutator (alternative to evolutionary engine) |
 | `src/baseline.rs` | BaselineProfile — null-hypothesis signal filtering + confidence scoring |
 | `src/agent.rs` | Fuzzer builder API with 9 vuln presets (SQLi, XSS, SSTI, CMDi, SSRF, path traversal, NoSQLi, XXE, prototype pollution) |
-| `src/payloads.rs` | Payload tables — curated corpus (`payload_data/*.json`, ~470 payloads with context/severity/targets metadata) loaded via `include_str!`; NoSQLi keeps a hand table |
+| `src/payloads.rs` | Payload tables — curated corpus (`payload_data/*.json`, ~600 payloads across 9 classes with context/severity/targets metadata) loaded via `include_str!` |
 | `src/mock_config.rs` | TOML-defined mock targets for offline calibration |
 
 ## Key Concepts

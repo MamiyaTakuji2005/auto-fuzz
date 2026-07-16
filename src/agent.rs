@@ -319,7 +319,7 @@ impl Preset {
     fn nosql_injection() -> Self {
         Self {
             table: Some(payloads::nosqli_table()),
-            seeds: payloads::NOSQLI_PAYLOADS.iter().map(|s| s.to_string()).collect(),
+            seeds: payloads::nosqli_table().payloads(),
             signal_set: SignalSet::new()
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(SizeClassifier::default()))

