@@ -147,6 +147,20 @@ pub struct Hit {
     pub suppressed: Vec<String>,
     /// Where this payload came from (table, user input, or evolutionary).
     pub source: PayloadSource,
+    /// Curated impact hint (`critical`/`high`/…), present for table-sourced hits.
+    pub severity: Option<String>,
+    /// Curated description of the payload, present for table-sourced hits.
+    pub description: Option<String>,
+    /// Curated injection context (`html_body`/`json`/`xml`/…), for table hits.
+    pub context: Option<String>,
+}
+
+/// Curated metadata carried from a `PayloadCase` into a table-sweep `Hit`.
+#[derive(Clone)]
+struct CaseMeta {
+    severity: String,
+    description: String,
+    context: String,
 }
 
 /// Final result returned to the agent.
@@ -233,7 +247,7 @@ impl Preset {
             table: Some(payloads::sqli_table()),
             atoms: ATOMS.iter().map(|s| s.to_string()).collect(),
             chain: ChainTable::defaults(),
-            seeds: payloads::SQLI_PAYLOADS.iter().map(|s| s.to_string()).collect(),
+            seeds: payloads::sqli_table().payloads(),
             signal_set: SignalSet::new()
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(ErrorClassifier::dbms_starter()))
@@ -248,7 +262,7 @@ impl Preset {
     fn xss() -> Self {
         Self {
             table: Some(payloads::xss_table()),
-            seeds: payloads::XSS_PAYLOADS.iter().map(|s| s.to_string()).collect(),
+            seeds: payloads::xss_table().payloads(),
             signal_set: SignalSet::new()
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(ReflectionClassifier))
@@ -262,7 +276,7 @@ impl Preset {
     fn ssti() -> Self {
         Self {
             table: Some(payloads::ssti_table()),
-            seeds: payloads::SSTI_PAYLOADS.iter().map(|s| s.to_string()).collect(),
+            seeds: payloads::ssti_table().payloads(),
             signal_set: SignalSet::new()
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(ReflectionClassifier))
@@ -276,7 +290,7 @@ impl Preset {
     fn command_injection() -> Self {
         Self {
             table: Some(payloads::cmd_table()),
-            seeds: payloads::CMD_PAYLOADS.iter().map(|s| s.to_string()).collect(),
+            seeds: payloads::cmd_table().payloads(),
             signal_set: SignalSet::new()
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(TimeDelayClassifier::default()))
@@ -290,7 +304,7 @@ impl Preset {
     fn path_traversal() -> Self {
         Self {
             table: Some(payloads::traversal_table()),
-            seeds: payloads::PATH_TRAVERSAL_PAYLOADS.iter().map(|s| s.to_string()).collect(),
+            seeds: payloads::traversal_table().payloads(),
             signal_set: SignalSet::new()
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(SizeClassifier::default()))
@@ -320,7 +334,7 @@ impl Preset {
     fn ssrf() -> Self {
         Self {
             table: Some(payloads::ssrf_table()),
-            seeds: payloads::SSRF_PAYLOADS.iter().map(|s| s.to_string()).collect(),
+            seeds: payloads::ssrf_table().payloads(),
             signal_set: SignalSet::new()
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(SizeClassifier::default()))
@@ -334,12 +348,31 @@ impl Preset {
     fn xxe() -> Self {
         Self {
             table: Some(payloads::xxe_table()),
-            seeds: payloads::XXE_PAYLOADS.iter().map(|s| s.to_string()).collect(),
+            seeds: payloads::xxe_table().payloads(),
             signal_set: SignalSet::new()
                 .with(Box::new(StatusClassifier))
                 .with(Box::new(SizeClassifier::default()))
-                .with(Box::new(ReflectionClassifier)),
+                .with(Box::new(ReflectionClassifier))
+                .with(Box::new(BodySignatureClassifier::file_read())),
             gen_ratio: 0.0, // pure havoc — structured XML benefits from mutation not generation
+            ..Default::default()
+        }
+    }
+
+    fn prototype_pollution() -> Self {
+        Self {
+            table: Some(payloads::proto_pollution_table()),
+            seeds: payloads::proto_pollution_table().payloads(),
+            // Blind PP is hard to confirm over HTTP without a probe gadget; this
+            // is a best-effort signal set (status change / error / body diff).
+            // Detection is the piece to refine next — the payload corpus is the
+            // point of adding the class now.
+            signal_set: SignalSet::new()
+                .with(Box::new(StatusClassifier))
+                .with(Box::new(ErrorClassifier::dbms_starter()))
+                .with(Box::new(BodyDiffClassifier)),
+            gen_ratio: 0.5, // structured JSON — some generation, mostly havoc from seeds
+            length: LengthPolicy::short(),
             ..Default::default()
         }
     }
@@ -537,6 +570,7 @@ impl<P: Probe + 'static> Fuzzer<P> {
     pub fn nosql_injection(mut self) -> Self { self.preset = Preset::nosql_injection(); self }
     pub fn ssrf(mut self) -> Self { self.preset = Preset::ssrf(); self }
     pub fn xxe(mut self) -> Self { self.preset = Preset::xxe(); self }
+    pub fn prototype_pollution(mut self) -> Self { self.preset = Preset::prototype_pollution(); self }
     /// Convenience: table sweep with the current preset's table.
     pub fn table_sweep(mut self) -> Self { self.mode = FuzzMode::Table; self }
 
@@ -734,18 +768,26 @@ impl<P: Probe + 'static> Fuzzer<P> {
 
         // ── Table / InputsOnly: exact sweep — no corpus, no mutation, no randomness ──
         if matches!(self.mode, FuzzMode::Table | FuzzMode::InputsOnly) {
-            let entries: Vec<(String, PayloadSource)> = match self.mode {
+            type SweepItem = (String, PayloadSource, Option<CaseMeta>);
+            let entries: Vec<SweepItem> = match self.mode {
                 FuzzMode::Table => {
                     let table = self.preset.table.as_ref()
                         .ok_or_else(|| "Table mode requires a preset with a payload table".to_string())?;
                     let preset_name = table.name.clone();
                     table.cases.iter().enumerate().map(|(i, c)| {
-                        (c.payload.clone(), PayloadSource::Table { preset: preset_name.clone(), index: i })
+                        let meta = CaseMeta {
+                            severity: c.severity.clone(),
+                            description: c.description.clone(),
+                            context: c.context.clone(),
+                        };
+                        (c.payload.clone(),
+                         PayloadSource::Table { preset: preset_name.clone(), index: i },
+                         Some(meta))
                     }).collect()
                 }
                 FuzzMode::InputsOnly => {
                     self.additional_seeds.iter().enumerate().map(|(i, s)| {
-                        (s.clone(), PayloadSource::UserInput { index: i })
+                        (s.clone(), PayloadSource::UserInput { index: i }, None)
                     }).collect()
                 }
                 _ => unreachable!(),
@@ -754,7 +796,7 @@ impl<P: Probe + 'static> Fuzzer<P> {
             let signal_set = &self.preset.signal_set;
             let feedback = &*self.preset.feedback;
             let sweep_budget = self.budget.min(entries.len());
-            let items: Vec<(String, PayloadSource)> =
+            let items: Vec<SweepItem> =
                 entries.into_iter().take(sweep_budget).collect();
 
             let mut hits: Vec<Hit> = Vec::new();
@@ -766,14 +808,18 @@ impl<P: Probe + 'static> Fuzzer<P> {
             let probes_sent = run_sweep_concurrent(
                 probe.clone(),
                 items,
-                |item: &(String, PayloadSource)| inject(&item.0),
+                |item: &SweepItem| inject(&item.0),
                 self.request_timeout,
                 self.max_concurrent,
                 self.probe_interval,
-                |(payload, source): (String, PayloadSource),
+                |(payload, source, meta): SweepItem,
                  req: Request,
                  outcome: Option<ProbeResponse>| {
                     let Some(resp) = outcome else { return false };
+                    let (m_sev, m_desc, m_ctx) = match meta {
+                        Some(m) => (Some(m.severity), Some(m.description), Some(m.context)),
+                        None => (None, None, None),
+                    };
 
                     // Classify — then filter through baseline profile.
                     let raw_signals = signal_set.run(&payload, &baseline_resp, &resp);
@@ -808,6 +854,9 @@ impl<P: Probe + 'static> Fuzzer<P> {
                             signals: signals.iter().map(|s| s.kind().to_string()).collect(),
                             suppressed: ambient.iter().map(|s| s.kind().to_string()).collect(),
                             source,
+                            severity: m_sev,
+                            description: m_desc,
+                            context: m_ctx,
                         };
 
                         if hit.confirmed {
@@ -939,6 +988,10 @@ impl<P: Probe + 'static> Fuzzer<P> {
                 signals: h.signals.iter().map(|s| s.kind().to_string()).collect(),
                 suppressed: h.ambient.iter().map(|s| s.kind().to_string()).collect(),
                 source,
+                // Mutated payloads have no curated case metadata.
+                severity: None,
+                description: None,
+                context: None,
             }
         };
 

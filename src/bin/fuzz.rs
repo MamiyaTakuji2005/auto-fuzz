@@ -140,6 +140,7 @@ fn apply_preset(f: Fuzzer<HttpProbe>, preset: &str) -> Result<Fuzzer<HttpProbe>,
         "nosql" => f.nosql_injection(),
         "ssrf" => f.ssrf(),
         "xxe" => f.xxe(),
+        "proto" | "prototype-pollution" => f.prototype_pollution(),
         other => return Err(format!("unknown preset: {other}")),
     })
 }
@@ -209,6 +210,10 @@ fn emit_jsonl(r: &FuzzResult, url: &str, method: &str, inject: &str, preset: &st
             "confidence": h.confidence,
             "signals": h.signals,
             "source": source_str(&h.source),
+            // Curated metadata — present for table-sourced hits, null otherwise.
+            "severity": h.severity,
+            "description": h.description,
+            "context": h.context,
         });
         println!("{obj}");
     };
@@ -226,7 +231,7 @@ async fn main() {
         Ok(a) => a,
         Err(e) => {
             if e != "help" { eprintln!("error: {e}\n"); }
-            eprintln!("usage: fuzz --preset <sqli|xss|ssti|cmdi|path|nosql|ssrf|xxe> --url <URL> \\");
+            eprintln!("usage: fuzz --preset <sqli|xss|ssti|cmdi|path|nosql|ssrf|xxe|proto> --url <URL> \\");
             eprintln!("            [--inject-query <param> | --inject-body '<tmpl with {{{{payload}}}}>'] \\");
             eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary] [--hunt]");
             eprintln!("            [--concurrency 1] [--rate-limit 0]  # concurrent probes + rate limiting");
