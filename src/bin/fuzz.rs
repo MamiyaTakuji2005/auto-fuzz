@@ -37,6 +37,8 @@ struct Args {
     concurrency: usize,
     /// Rate limit in requests per second (0 = unlimited).
     rate_limit: f32,
+    /// Out-of-band collaborator (URL or bare host) for `{{oob}}` substitution.
+    oob: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -56,6 +58,7 @@ fn parse_args() -> Result<Args, String> {
     let mut jsonl = false;
     let mut concurrency = 1usize;
     let mut rate_limit = 0.0f32;
+    let mut oob = None;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -104,6 +107,7 @@ fn parse_args() -> Result<Args, String> {
                 rate_limit = take_val(&mut i)?.parse()
                     .map_err(|_| "rate-limit must be a number".to_string())?;
             }
+            "--oob-url" | "--oob" | "--interactsh-url" => oob = Some(take_val(&mut i)?),
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown flag: {other}")),
         }
@@ -127,6 +131,7 @@ fn parse_args() -> Result<Args, String> {
         jsonl,
         concurrency,
         rate_limit,
+        oob,
     })
 }
 
@@ -235,6 +240,7 @@ async fn main() {
             eprintln!("            [--inject-query <param> | --inject-body '<tmpl with {{{{payload}}}}>'] \\");
             eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary] [--hunt]");
             eprintln!("            [--concurrency 1] [--rate-limit 0]  # concurrent probes + rate limiting");
+            eprintln!("            [--oob-url <collaborator>]  # substituted into {{{{oob}}}} (OOB payloads skipped if unset)");
             eprintln!("            [--header 'Name: Value']... [--cookie 'a=b; c=d']");
             eprintln!("            [--csrf-url <URL> [--csrf-field user_token] [--csrf-regex <pat with group 1>]]");
             eprintln!("            [--jsonl]   # one JSON object per hit to stdout, silent otherwise");
@@ -328,6 +334,10 @@ async fn main() {
         f = f.hunt();
         if verbose { println!("mode:      HUNT (recall-first — flags any response unlike baseline)"); }
     }
+    if let Some(oob) = &args.oob {
+        f = f.oob(oob);
+        if verbose { println!("oob:       {} (substituted into {{{{oob}}}})", oob); }
+    }
 
     // Injection descriptor for the JSONL context field.
     let inject = match (&args.inject_body, &args.inject_query) {
@@ -338,6 +348,12 @@ async fn main() {
 
     match f.run().await {
         Ok(r) => {
+            if r.oob_skipped > 0 {
+                eprintln!(
+                    "[fuzz] skipped {} OOB payload(s) — pass --oob-url <collaborator> to enable them",
+                    r.oob_skipped
+                );
+            }
             if args.jsonl {
                 emit_jsonl(&r, &base_url, &args.method, &inject, &args.preset);
             } else {

