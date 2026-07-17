@@ -385,6 +385,22 @@ impl ErrorClassifier {
             ("generic",  r"(?i)sql syntax|unclosed quotation mark"),
         ])
     }
+
+    /// Node.js / V8 runtime error signatures useful for detecting JS sink hits.
+    pub fn nodejs_starter() -> Self {
+        Self::new(&[
+            ("node", r"(?i)ReferenceError"),
+            ("node", r"(?i)SyntaxError"),
+            ("node", r"(?i)TypeError"),
+            ("node", r"(?i)EvalError"),
+            ("node", r"(?i)RangeError"),
+            ("node", r"(?i)URIError"),
+            ("node", r"(?i)at .* \(.*:\d+:\d+\)"),
+            ("node", r"(?i)Cannot find module"),
+            ("node", r"(?i)Module not found"),
+            ("node", r"(?i)process\.binding is not supported"),
+        ])
+    }
 }
 
 impl Classifier for ErrorClassifier {

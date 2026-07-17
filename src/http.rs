@@ -42,11 +42,24 @@ impl HttpProbe {
     }
 
     fn client(timeout: Duration) -> reqwest::Client {
-        reqwest::Client::builder()
+        // `mut` is only needed when the keepalive-disable block below is compiled
+        // in (default); with the `keepalive` feature on, that block is cfg'd out.
+        #[cfg_attr(feature = "keepalive", allow(unused_mut))]
+        let mut builder = reqwest::Client::builder()
             .timeout(timeout)
-            .cookie_store(true) // persist the session across token-GET and probe
-            .build()
-            .expect("failed to build HTTP client")
+            .cookie_store(true); // persist the session across token-GET and probe
+
+        // By default, disable HTTP keepalive. Fuzzing typically opens a fresh
+        // connection per probe so the target cannot throttle us by serializing
+        // many in-flight requests down one persistent pipe. Enable the
+        // `keepalive` feature to restore connection reuse (e.g. for stateful
+        // targets or login sessions that break on churn).
+        #[cfg(not(feature = "keepalive"))]
+        {
+            builder = builder.pool_max_idle_per_host(0);
+        }
+
+        builder.build().expect("failed to build HTTP client")
     }
 
     /// GET the CSRF page in-session and pull the token out of the response body.

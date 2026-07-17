@@ -67,7 +67,12 @@ path = "src/bin/sweep.rs"
 [features]
 default = []
 # Real HTTP transport (reqwest) — enables the `http` module + `fuzz` CLI.
+# Keepalive is DISABLED by default: fuzzing benefits from fresh connections
+# per request so the target cannot serialize probes down a single pipe.
 http = ["dep:reqwest"]
+# Opt-in to connection reuse (keepalive). Useful for targets that rate-limit
+# connection churn or require session state across probes.
+keepalive = ["http"]
 # GUI workbench builds on the HTTP transport.
 gui = ["http", "dep:egui", "dep:eframe"]
 

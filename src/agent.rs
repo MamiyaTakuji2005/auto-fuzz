@@ -224,6 +224,8 @@ struct Preset {
     gen_ratio: f32,
     placement: PlacementPolicy,
     length: LengthPolicy,
+    /// Optional bypass shells passed to the havoc mutator's WrapDelimiter op.
+    shells: Vec<(String, String)>,
     // Mode is NOT stored here — it's on the Fuzzer builder.
 }
 
@@ -239,6 +241,7 @@ impl Default for Preset {
             gen_ratio: 0.7, // safe default — moderate generation
             placement: PlacementPolicy::default(),
             length: LengthPolicy::medium(),
+            shells: vec![],
         }
     }
 }
@@ -258,6 +261,7 @@ impl Preset {
             gen_ratio: 0.8, // per-class: plateaus at 0.8 (944 hits/1k)
             placement: PlacementPolicy::default(),
             length: LengthPolicy::medium(), // SQLi not length-sensitive
+            shells: vec![],
         }
     }
 
@@ -386,6 +390,7 @@ impl Preset {
             ..Default::default()
         }
     }
+
 }
 
 // ── Injection point ────────────────────────────────────────────────────
@@ -1027,7 +1032,8 @@ impl<P: Probe + 'static> Fuzzer<P> {
             self.preset.placement,
             self.preset.length,
         );
-        let havoc = HavocMutator::new(sampler.clone(), self.budget * 4);
+        let havoc = HavocMutator::new(sampler.clone(), self.budget * 4)
+            .with_shells(self.preset.shells);
         // Assemble seeds; skip OOB-templated seeds when no collaborator is set
         // (a `{{oob}}` seed can't fire, and havoc won't resynthesize the token).
         let mut seed_list: Vec<String> = self.preset.seeds.clone();

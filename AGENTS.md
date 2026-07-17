@@ -19,16 +19,29 @@ cargo run --bin fuzz-gui --features gui --release   # GUI workbench
 ```
 
 The real HTTP transport (`HttpProbe`) lives in `src/http.rs` behind the `http`
-feature (reqwest only; `gui` builds on top of it). `fuzz` is the headless CLI
-for pointing a preset at a live URL with a probe budget; its report is
-mechanics-first (baseline, probes, every signal observed) so the request →
-baseline-diff → classify pipeline is visible even with zero confirmed hits.
+feature (reqwest only; `gui` builds on top of it). HTTP keepalive is **off by
+default** (fresh connection per probe, so the target can't serialize probes down
+one persistent pipe); enable the `keepalive` feature to restore connection reuse
+for stateful/session targets or ones that rate-limit connection churn. `fuzz` is
+the headless CLI for pointing a preset at a live URL with a probe budget; its
+report is mechanics-first (baseline, probes, every signal observed) so the
+request → baseline-diff → classify pipeline is visible even with zero confirmed
+hits.
 `--header 'Name: Value'` (repeatable) and `--cookie 'a=b'` carry auth/session
 into every request (baseline + probes), for targets behind a login like DVWA.
 `--csrf-url <URL>` refreshes a per-request CSRF token (cookie store on) for
 stateful login forms. `--jsonl` emits one JSON object per hit to stdout (silent
 otherwise; summary to stderr) — pipes into jq or the single-target spider loop
 (`06-crawler`): spider maps a target's endpoints → fuzz each → JSONL findings.
+
+**Injection modes** (mutually exclusive; JSON body > body template > query):
+`--inject-query <param>`, `--inject-body '<tmpl with {{payload}}>'` (form body),
+`--inject-body-file <path>` (body template read from a file — preserves trailing
+newlines that shell `$(…)` would strip, for NDJSON `_bulk`-style bodies) with an
+optional `--content-type <ct>`, or `--inject-json` (the payload becomes the whole
+`application/json` body, for prototype pollution / NoSQLi). `--seed <u64>` fixes
+the RNG for deterministic replay (omit for entropy); pairs with `--concurrency`
+(same seed + same concurrency = same candidate sequence).
 
 **OOB templating:** payloads needing a call-back (blind CMDi, OOB XXE, SSRF, DNS
 exfil) carry the placeholder `{{oob}}` — a **bare host**, so the payload writes

@@ -21,9 +21,13 @@ struct Args {
     inject_query: Option<String>,
     /// Form-encoded POST body template with `{{payload}}`, e.g. `pass={{payload}}`.
     inject_body: Option<String>,
+    /// Path to a file containing the body template (preserves trailing newlines).
+    inject_body_file: Option<String>,
     /// Raw JSON body: the payload becomes the whole body with `application/json`
     /// (for prototype pollution / NoSQLi JSON injection).
     inject_json: bool,
+    /// Content-Type for --inject-body (default: application/x-www-form-urlencoded).
+    content_type: Option<String>,
     budget: usize,
     timeout_secs: u64,
     mode: FuzzMode,
@@ -42,6 +46,8 @@ struct Args {
     rate_limit: f32,
     /// Out-of-band collaborator (URL or bare host) for `{{oob}}` substitution.
     oob: Option<String>,
+    /// Optional RNG seed for deterministic runs.
+    seed: Option<u64>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -50,6 +56,7 @@ fn parse_args() -> Result<Args, String> {
     let mut method = "GET".to_string();
     let mut inject_query = None;
     let mut inject_body = None;
+    let mut inject_body_file = None;
     let mut inject_json = false;
     let mut budget = 100usize;
     let mut timeout_secs = 15u64;
@@ -63,6 +70,8 @@ fn parse_args() -> Result<Args, String> {
     let mut concurrency = 1usize;
     let mut rate_limit = 0.0f32;
     let mut oob = None;
+    let mut seed = None;
+    let mut content_type = None;
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -79,6 +88,7 @@ fn parse_args() -> Result<Args, String> {
             "--method" => method = take_val(&mut i)?.to_uppercase(),
             "--inject-query" => inject_query = Some(take_val(&mut i)?),
             "--inject-body" => inject_body = Some(take_val(&mut i)?),
+            "--inject-body-file" => inject_body_file = Some(take_val(&mut i)?),
             "--inject-json" => inject_json = true,
             "--budget" => budget = take_val(&mut i)?.parse().map_err(|_| "budget must be a number".to_string())?,
             "--timeout" => timeout_secs = take_val(&mut i)?.parse().map_err(|_| "timeout must be a number".to_string())?,
@@ -113,6 +123,8 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|_| "rate-limit must be a number".to_string())?;
             }
             "--oob-url" | "--oob" | "--interactsh-url" => oob = Some(take_val(&mut i)?),
+            "--seed" => seed = Some(take_val(&mut i)?.parse().map_err(|_| "seed must be a number".to_string())?),
+            "--content-type" => content_type = Some(take_val(&mut i)?),
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown flag: {other}")),
         }
@@ -125,6 +137,7 @@ fn parse_args() -> Result<Args, String> {
         method,
         inject_query,
         inject_body,
+        inject_body_file,
         inject_json,
         budget,
         timeout_secs,
@@ -138,6 +151,8 @@ fn parse_args() -> Result<Args, String> {
         concurrency,
         rate_limit,
         oob,
+        seed,
+        content_type,
     })
 }
 
@@ -243,15 +258,31 @@ async fn main() {
         Err(e) => {
             if e != "help" { eprintln!("error: {e}\n"); }
             eprintln!("usage: fuzz --preset <sqli|xss|ssti|cmdi|path|nosql|ssrf|xxe|proto> --url <URL> \\");
-            eprintln!("            [--inject-query <param> | --inject-body '<tmpl with {{{{payload}}}}>' | --inject-json] \\");
+            eprintln!("            [--inject-query <param> | --inject-body '<tmpl>' | --inject-body-file <path> [--content-type <ct>] | --inject-json] \\");
             eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary] [--hunt]");
             eprintln!("            [--concurrency 1] [--rate-limit 0]  # concurrent probes + rate limiting");
+            eprintln!("            [--seed <u64>]  # deterministic RNG (omit for entropy)");
             eprintln!("            [--oob-url <collaborator>]  # substituted into {{{{oob}}}} (OOB payloads skipped if unset)");
             eprintln!("            [--header 'Name: Value']... [--cookie 'a=b; c=d']");
             eprintln!("            [--csrf-url <URL> [--csrf-field user_token] [--csrf-regex <pat with group 1>]]");
             eprintln!("            [--jsonl]   # one JSON object per hit to stdout, silent otherwise");
             std::process::exit(if e == "help" { 0 } else { 2 });
         }
+    };
+
+    // If --inject-body-file was given, read the file verbatim (preserves trailing
+    // newlines that bash command substitution would strip).
+    let inject_body = if let Some(path) = &args.inject_body_file {
+        if args.inject_body.is_some() {
+            eprintln!("error: --inject-body and --inject-body-file are mutually exclusive");
+            std::process::exit(2);
+        }
+        match std::fs::read_to_string(path) {
+            Ok(s) => Some(s),
+            Err(e) => { eprintln!("error: failed to read --inject-body-file {path}: {e}"); std::process::exit(2); }
+        }
+    } else {
+        args.inject_body.clone()
     };
 
     // When injecting into a query param, drop only that param's existing value
@@ -284,8 +315,9 @@ async fn main() {
         if let Some(q) = &args.inject_query {
             println!("inject:    query param `{q}`");
         }
-        if let Some(t) = &args.inject_body {
-            println!("inject:    form body `{t}`");
+        if let Some(t) = &inject_body {
+            let ct = args.content_type.as_deref().unwrap_or("application/x-www-form-urlencoded");
+            println!("inject:    body `{ct}` `{t}`");
         }
         if args.inject_json {
             println!("inject:    raw JSON body (payload is the body; application/json)");
@@ -324,11 +356,15 @@ async fn main() {
     for (name, value) in &args.headers {
         f = f.header(name, value);
     }
-    // Injection point (mutually exclusive; JSON body wins, then form body, then query).
+    // Injection point (mutually exclusive; JSON body wins, then body template/form, then query).
     if args.inject_json {
         f = f.body_json("{{payload}}"); // payload IS the JSON body
-    } else if let Some(t) = &args.inject_body {
-        f = f.body_form(t);
+    } else if let Some(t) = &inject_body {
+        if let Some(ct) = &args.content_type {
+            f = f.body_template(ct, t);
+        } else {
+            f = f.body_form(t);
+        }
     } else if let Some(q) = &args.inject_query {
         f = f.inject_query(q);
     }
@@ -349,13 +385,20 @@ async fn main() {
         f = f.oob(oob);
         if verbose { println!("oob:       {} (substituted into {{{{oob}}}})", oob); }
     }
+    if let Some(seed) = args.seed {
+        f = f.replay_seed(seed);
+        if verbose { println!("seed:      {}", seed); }
+    }
 
     // Injection descriptor for the JSONL context field.
     let inject = if args.inject_json {
         "json-body".to_string()
     } else {
-        match (&args.inject_body, &args.inject_query) {
-            (Some(t), _) => format!("body:{t}"),
+        match (&inject_body, &args.inject_query) {
+            (Some(t), _) => {
+                let ct = args.content_type.as_deref().unwrap_or("form");
+                format!("body:{ct}:{t}")
+            }
             (_, Some(q)) => format!("query:{q}"),
             _ => if args.method == "POST" { "body".into() } else { "query:q".into() },
         }
