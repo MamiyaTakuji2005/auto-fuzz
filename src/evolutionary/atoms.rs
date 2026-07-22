@@ -104,6 +104,19 @@ impl ChainTable {
         self
     }
 
+    /// Build a table from a nested `from → (to → weight)` map — the on-disk
+    /// shape of an external module's `grammar.chain` (see `crate::module`).
+    /// Mirrors the internal representation, so it's a direct load.
+    pub fn from_map(map: HashMap<String, HashMap<String, f32>>) -> Self {
+        let mut t = Self::new();
+        for (from, inner) in map {
+            for (to, w) in inner {
+                t.set(from.clone(), to, w);
+            }
+        }
+        t
+    }
+
     pub fn weight(&self, from: &str, to: &str) -> f32 {
         self.weights
             .get(from)

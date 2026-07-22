@@ -64,20 +64,21 @@ pub struct PayloadTable {
     pub cases: Vec<PayloadCase>,
 }
 
-/// Raw shape of one entry in a curated `payload_data/*.json` file.
-#[derive(Debug, Deserialize)]
-struct RawPayload {
-    value: String,
+/// Raw shape of one entry in a curated `payload_data/*.json` file — also the
+/// `payloads` array in an external module file (see `crate::module`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawPayload {
+    pub value: String,
     #[serde(default)]
-    encoding: String,
+    pub encoding: String,
     #[serde(default)]
-    context: String,
+    pub context: String,
     #[serde(default)]
-    targets: Vec<String>,
+    pub targets: Vec<String>,
     #[serde(default)]
-    description: String,
+    pub description: String,
     #[serde(default)]
-    severity_hint: String,
+    pub severity_hint: String,
 }
 
 impl PayloadTable {
@@ -119,6 +120,19 @@ impl PayloadTable {
     ) -> Self {
         let raw: Vec<RawPayload> = serde_json::from_str(json)
             .unwrap_or_else(|e| panic!("payload_data/{name}.json is malformed: {e}"));
+        Self::from_raw(name, category, default_risk, raw)
+    }
+
+    /// Build from already-parsed [`RawPayload`] entries, preserving per-payload
+    /// metadata and applying the same risk-upgrade rule as [`from_curated`].
+    /// Used both by the built-in `include_str!` tables and by external module
+    /// files (`crate::module`), which deserialize their own `payloads` array.
+    pub fn from_raw(
+        name: &str,
+        category: PayloadCategory,
+        default_risk: PayloadRisk,
+        raw: Vec<RawPayload>,
+    ) -> Self {
         Self {
             name: name.into(),
             cases: raw.into_iter().enumerate().map(|(i, r)| PayloadCase {

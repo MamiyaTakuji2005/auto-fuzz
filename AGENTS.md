@@ -58,6 +58,20 @@ alias); it's substituted at injection time. Without it, OOB payloads are skipped
 (reported to stderr), not sent as dead probes. See the heavy note above
 `substitute_oob` in `agent.rs` for why `{{oob}}` is a host, not a URL.
 
+**External module files** — `--preset <arg>` is dual-purpose: a known class name
+(`sqli`, `ssrf`, …) selects the compiled-in preset; anything else is a path to a
+module `.json`. A module is a *diff over a base class*: it names a `class` (which
+supplies the detectors + feedback, and any section the file omits) then overrides
+the data half — `grammar` (`atoms`, `chain`, `placement`, `length`), `payloads`,
+`gen_ratio`, `shells`. Grammar and payloads are separate sections in one file, so
+"my seeds but the hardcoded atoms" is just an omitted `grammar`. The chain mirrors
+the internal `from → {to → weight}` map — you edit the tuned artifact directly.
+See `modules/ssrf-cloud-metadata.json` for a worked example, and `src/module.rs`
+for the schema. A class name shadows a same-named file (`./name.json` forces the
+file). Detectors still come from the base `class`; the reserved `signals` key
+(name → classifier registry, for fully self-contained modules) is parsed but not
+yet acted on. Loaded via `ModuleFile::from_path` → `Fuzzer::module_file`.
+
 `tests/calibration.rs` is a deterministic regression guard: it runs every
 `targets.toml` target through the loop at fixed seeds and asserts each clears a
 per-target hit-rate floor (and that `waf-blocked` stays at 0). It catches

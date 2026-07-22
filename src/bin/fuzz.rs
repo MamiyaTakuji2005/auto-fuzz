@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use auto_fuzz::agent::{FuzzMode, FuzzResult, Fuzzer, Hit, PayloadSource};
 use auto_fuzz::http::{CsrfConfig, HttpProbe};
+use auto_fuzz::module::ModuleFile;
 
 struct Args {
     preset: String,
@@ -156,6 +157,10 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
+// `--preset <arg>` is dual-purpose: a known class name selects the compiled-in
+// module; anything else is treated as a path to an external module file (grammar
+// + payloads, applied as a diff over the file's declared `class`). A class name
+// shadows a same-named file — use `./name` to force the file.
 fn apply_preset(f: Fuzzer<HttpProbe>, preset: &str) -> Result<Fuzzer<HttpProbe>, String> {
     Ok(match preset {
         "sqli" => f.sql_injection(),
@@ -167,7 +172,12 @@ fn apply_preset(f: Fuzzer<HttpProbe>, preset: &str) -> Result<Fuzzer<HttpProbe>,
         "ssrf" => f.ssrf(),
         "xxe" => f.xxe(),
         "proto" | "prototype-pollution" => f.prototype_pollution(),
-        other => return Err(format!("unknown preset: {other}")),
+        path => {
+            let module = ModuleFile::from_path(path).map_err(|e| {
+                format!("--preset '{path}' is neither a known class nor a loadable module file: {e}")
+            })?;
+            f.module_file(module)?
+        }
     })
 }
 
@@ -257,7 +267,9 @@ async fn main() {
         Ok(a) => a,
         Err(e) => {
             if e != "help" { eprintln!("error: {e}\n"); }
-            eprintln!("usage: fuzz --preset <sqli|xss|ssti|cmdi|path|nosql|ssrf|xxe|proto> --url <URL> \\");
+            eprintln!("usage: fuzz --preset <class|path> --url <URL> \\");
+            eprintln!("            # class = sqli|xss|ssti|cmdi|path|nosql|ssrf|xxe|proto (compiled-in),");
+            eprintln!("            # or a path to an external module .json (grammar + payloads over a base class)");
             eprintln!("            [--inject-query <param> | --inject-body '<tmpl>' | --inject-body-file <path> [--content-type <ct>] | --inject-json] \\");
             eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary] [--hunt]");
             eprintln!("            [--concurrency 1] [--rate-limit 0]  # concurrent probes + rate limiting");
