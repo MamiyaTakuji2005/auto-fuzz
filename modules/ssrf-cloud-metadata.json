@@ -6,6 +6,8 @@
 
   "gen_ratio": 0.3,
 
+  "signals": ["status", "size", "time-delay", "body-signature:cloud"],
+
   "grammar": {
     "atoms": [
       "http://",

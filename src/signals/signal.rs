@@ -163,6 +163,12 @@ impl SignalSet {
             .with(Box::new(ErrorClassifier::dbms_starter()))
     }
 
+    /// Number of classifiers in the set.
+    pub fn len(&self) -> usize { self.classifiers.len() }
+
+    /// True when no classifier has been added.
+    pub fn is_empty(&self) -> bool { self.classifiers.is_empty() }
+
     /// Run every classifier; collect any signals.
     pub fn run(&self, payload: &str, baseline: &ProbeResponse, probe: &ProbeResponse) -> Vec<Signal> {
         self.classifiers

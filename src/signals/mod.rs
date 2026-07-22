@@ -7,6 +7,7 @@
 //! The evolutionary engine now lives in `fuzzer_v2::evolution`.
 
 pub mod mutator;
+pub mod registry;
 pub mod signal;
 
 use std::collections::HashMap;
@@ -14,6 +15,7 @@ use async_trait::async_trait;
 
 pub use signal::{ProbeResponse, ReflectionEncoding, Signal, SignalSet};
 pub use mutator::{Mutator, SignalGuidedMutator, StaticListMutator};
+pub use registry::{classifier_from_name, signal_set_from_names, KNOWN_SIGNALS};
 
 /// A minimal HTTP request fed to a [`Probe`].
 #[derive(Debug, Clone)]

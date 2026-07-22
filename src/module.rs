@@ -55,8 +55,10 @@ pub struct ModuleFile {
     #[serde(default)]
     pub payloads: Option<Vec<RawPayload>>,
 
-    /// Reserved for self-contained modules (name → classifier registry). Parsed
-    /// but ignored until the registry lands, so adding it later is additive.
+    /// Detector names, resolved through `crate::signals::registry`
+    /// (`["status", "error:dbms", "body-signature:cloud"]`). A non-empty list
+    /// makes the module self-contained — it replaces the base class's detectors.
+    /// Absent/empty → inherit the class's set. See `KNOWN_SIGNALS` for the names.
     #[serde(default)]
     pub signals: Vec<String>,
 }

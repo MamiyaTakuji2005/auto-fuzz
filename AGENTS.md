@@ -68,9 +68,14 @@ the data half — `grammar` (`atoms`, `chain`, `placement`, `length`), `payloads
 the internal `from → {to → weight}` map — you edit the tuned artifact directly.
 See `modules/ssrf-cloud-metadata.json` for a worked example, and `src/module.rs`
 for the schema. A class name shadows a same-named file (`./name.json` forces the
-file). Detectors still come from the base `class`; the reserved `signals` key
-(name → classifier registry, for fully self-contained modules) is parsed but not
-yet acted on. Loaded via `ModuleFile::from_path` → `Fuzzer::module_file`.
+file). A non-empty `signals` array makes the module **self-contained** — it names
+its detectors (`["status","error:dbms","body-signature:cloud"]`), resolved through
+`signals::registry` (`KNOWN_SIGNALS` lists the names: `status`, `size`,
+`reflection`, `time-delay`, `body-diff`, `proto-pollution`, `error:dbms`,
+`error:nodejs`, `body-signature:file`, `body-signature:cloud`, `novelty`) and
+replacing the base class's set. Omit it to inherit the class's detectors. Feedback
+still comes from the base `class` (not yet name-addressable). Loaded via
+`ModuleFile::from_path` → `Fuzzer::module_file`.
 
 `tests/calibration.rs` is a deterministic regression guard: it runs every
 `targets.toml` target through the loop at fixed seeds and asserts each clears a

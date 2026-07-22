@@ -436,6 +436,13 @@ impl Preset {
         if let Some(gr) = m.gen_ratio { base.gen_ratio = gr; }
         if !m.shells.is_empty() { base.shells = m.shells; }
 
+        // A `signals` list makes the module self-contained: it replaces the base
+        // class's detectors wholesale. Absent → inherit the class's set. Feedback
+        // still comes from the class (it isn't name-addressable yet).
+        if !m.signals.is_empty() {
+            base.signal_set = crate::signals::signal_set_from_names(&m.signals)?;
+        }
+
         Ok(base)
     }
 
@@ -1246,6 +1253,29 @@ mod tests {
     #[test]
     fn module_file_unknown_class_is_an_error() {
         let m = ModuleFile::from_str(r#"{ "class": "not-a-class" }"#).unwrap();
+        assert!(Preset::from_module_file(m).is_err());
+    }
+
+    #[test]
+    fn module_file_signals_override_replaces_detectors() {
+        let json = r#"{ "class": "ssrf", "signals": ["status", "error:dbms"] }"#;
+        let m = ModuleFile::from_str(json).unwrap();
+        let p = Preset::from_module_file(m).unwrap();
+        // Wholesale replacement: exactly the two named, not ssrf's four.
+        assert_eq!(p.signal_set.len(), 2);
+    }
+
+    #[test]
+    fn module_file_absent_signals_inherit_base_class() {
+        let base = Preset::ssrf();
+        let m = ModuleFile::from_str(r#"{ "class": "ssrf" }"#).unwrap();
+        let p = Preset::from_module_file(m).unwrap();
+        assert_eq!(p.signal_set.len(), base.signal_set.len(), "detectors inherited from class");
+    }
+
+    #[test]
+    fn module_file_unknown_signal_is_an_error() {
+        let m = ModuleFile::from_str(r#"{ "class": "ssrf", "signals": ["status", "teapot"] }"#).unwrap();
         assert!(Preset::from_module_file(m).is_err());
     }
 
