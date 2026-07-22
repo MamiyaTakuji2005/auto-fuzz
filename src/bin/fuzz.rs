@@ -261,24 +261,82 @@ fn emit_jsonl(r: &FuzzResult, url: &str, method: &str, inject: &str, preset: &st
     );
 }
 
+// Full help. `-h`/`--help` prints this to stdout (exit 0); parse errors print a
+// one-line hint to stderr (exit 2). `{{payload}}`/`{{oob}}` are literal here.
+const HELP: &str = r#"fuzz — headless evolutionary fuzzer for a single URL
+
+USAGE:
+    fuzz --preset <class|path> --url <URL> [options]
+
+PRESET (required):
+    --preset <class|path>     Built-in class, or a path to an external module .json.
+                              classes: sqli xss ssti cmdi path nosql ssrf xxe proto
+                              A module file is a diff over its base class (grammar +
+                              payloads); a class name shadows a same-named file, so
+                              use ./name.json to force the file.
+
+TARGET (required):
+    --url <URL>               Target URL.
+    --method <M>              HTTP method (default: GET).
+
+INJECTION POINT — where {{payload}} lands (mutually exclusive):
+    --inject-query <param>    Inject into a query parameter.
+    --inject-body <tmpl>      Form body template containing {{payload}}.
+    --inject-body-file <p>    Read the body template from a file, preserving trailing
+                              newlines (needed for NDJSON / _bulk bodies).
+    --inject-json             The payload IS the whole application/json body
+                              (prototype pollution / NoSQLi).
+    --content-type <ct>       Content-Type for --inject-body
+                              (default: application/x-www-form-urlencoded).
+
+RUN CONTROL:
+    --budget <n>              Probe budget (default: 100).
+    --timeout <secs>          Per-request timeout (default: 15).
+    --mode <mode>             evolutionary | table | table-then-evo | inputs-only
+                              (default: evolutionary).
+    --concurrency <n>         Max in-flight probes (default: 1).  alias: --conc
+    --rate-limit <rps>        Requests/sec, 0 = unlimited (default: 0).  alias: --rate
+    --seed <u64>              Fix the RNG for deterministic replay (omit for entropy).
+
+DETECTION:
+    --hunt                    Recall-first: also flag responses unlike the baseline
+                              (anomalies), reported but not confirmed.
+    --oob-url <collab>        OOB collaborator (URL or bare host) substituted into
+                              {{oob}}. Without it, OOB payloads are skipped.
+                              aliases: --oob, --interactsh-url
+
+SESSION / AUTH:
+    --header 'Name: Value'    Static header on every request (repeatable).
+    --cookie 'a=b; c=d'       Shorthand for --header 'Cookie: ...'.
+    --csrf-url <URL>          Refresh a CSRF token (GET) in-session before each probe.
+    --csrf-field <name>       Token field name (default: user_token).
+    --csrf-regex <pat>        Token-extraction regex; capture group 1 is the token.
+
+OUTPUT:
+    --jsonl                   One JSON object per hit to stdout, silent otherwise.
+                              alias: --json
+    -h, --help                Show this help.
+
+EXAMPLES:
+    fuzz --preset sqli --url 'https://t/post.php' --inject-query id --budget 150
+    fuzz --preset ssrf --url 'https://t/fetch' --inject-query url --oob-url x.oast.me
+    fuzz --preset modules/ssrf-cloud-metadata.json --url 'https://t/fetch' \
+         --inject-query url --seed 42
+    fuzz --preset proto --url 'https://t/api' --method POST --inject-json --jsonl
+"#;
+
 #[tokio::main]
 async fn main() {
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
-            if e != "help" { eprintln!("error: {e}\n"); }
-            eprintln!("usage: fuzz --preset <class|path> --url <URL> \\");
-            eprintln!("            # class = sqli|xss|ssti|cmdi|path|nosql|ssrf|xxe|proto (compiled-in),");
-            eprintln!("            # or a path to an external module .json (grammar + payloads over a base class)");
-            eprintln!("            [--inject-query <param> | --inject-body '<tmpl>' | --inject-body-file <path> [--content-type <ct>] | --inject-json] \\");
-            eprintln!("            [--method GET] [--budget 100] [--timeout 15] [--mode evolutionary] [--hunt]");
-            eprintln!("            [--concurrency 1] [--rate-limit 0]  # concurrent probes + rate limiting");
-            eprintln!("            [--seed <u64>]  # deterministic RNG (omit for entropy)");
-            eprintln!("            [--oob-url <collaborator>]  # substituted into {{{{oob}}}} (OOB payloads skipped if unset)");
-            eprintln!("            [--header 'Name: Value']... [--cookie 'a=b; c=d']");
-            eprintln!("            [--csrf-url <URL> [--csrf-field user_token] [--csrf-regex <pat with group 1>]]");
-            eprintln!("            [--jsonl]   # one JSON object per hit to stdout, silent otherwise");
-            std::process::exit(if e == "help" { 0 } else { 2 });
+            if e == "help" {
+                print!("{HELP}");
+                std::process::exit(0);
+            }
+            eprintln!("error: {e}");
+            eprintln!("run `fuzz --help` for usage.");
+            std::process::exit(2);
         }
     };
 
