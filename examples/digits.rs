@@ -6,7 +6,7 @@
 //! and 500 for any payload containing "7". Seeds are ["1","2","3"] — the fuzzer
 //! must discover "7" and "42" through evolution.
 
-use auto_fuzz::evolutionary::*;
+use fuzzz::evolutionary::*;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -74,7 +74,7 @@ impl Feedback for SimpleFeedback {
 #[tokio::main]
 async fn main() {
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║         auto-fuzz — atoms [0-9], find \"7\" and \"42\"          ║");
+    println!("║         fuzzz — atoms [0-9], find \"7\" and \"42\"          ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
     // ── 1. Atoms: just 0–9 ──────────────────────────────────────────────

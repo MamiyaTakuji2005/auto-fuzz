@@ -1,4 +1,4 @@
-//! `auto-fuzz` — a general-purpose evolutionary fuzzer engine.
+//! `fuzzz` — a general-purpose evolutionary fuzzer engine.
 //!
 //! Architecture: atom-chain generation engine with four decoupled primitives:
 //!   - Atom tables — the vocabulary

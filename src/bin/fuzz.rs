@@ -1,4 +1,4 @@
-//! `fuzz` — headless CLI runner for the auto-fuzz engine against a real URL.
+//! `fuzz` — headless CLI runner for the fuzzz engine against a real URL.
 //!
 //! Run: `cargo run --bin fuzz --features http -- --preset sqli \
 //!         --url 'https://target/post.php' --inject-query id --budget 150`
@@ -11,9 +11,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use auto_fuzz::agent::{FuzzMode, FuzzResult, Fuzzer, Hit, PayloadSource};
-use auto_fuzz::http::{CsrfConfig, HttpProbe};
-use auto_fuzz::module::ModuleFile;
+use fuzzz::agent::{FuzzMode, FuzzResult, Fuzzer, Hit, PayloadSource};
+use fuzzz::http::{CsrfConfig, HttpProbe};
+use fuzzz::module::ModuleFile;
 
 struct Args {
     preset: String,

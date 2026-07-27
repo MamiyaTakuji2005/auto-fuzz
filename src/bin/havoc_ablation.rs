@@ -13,17 +13,17 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use auto_fuzz::evolutionary::{
+use fuzzz::evolutionary::{
     ChainTable, EvolutionaryLoop, HavocMutator, LengthPolicy,
     PlacementPolicy, SeedCorpus, WeightedSampler, HttpFeedback, BoostMode,
 };
-use auto_fuzz::evolutionary::havoc::HavocSchedule;
-use auto_fuzz::evolutionary::atoms::ATOMS;
-use auto_fuzz::mock_config::{load_config, ConfigProbe};
-use auto_fuzz::signals::signal::{
+use fuzzz::evolutionary::havoc::HavocSchedule;
+use fuzzz::evolutionary::atoms::ATOMS;
+use fuzzz::mock_config::{load_config, ConfigProbe};
+use fuzzz::signals::signal::{
     ErrorClassifier, ReflectionClassifier, StatusClassifier, TimeDelayClassifier,
 };
-use auto_fuzz::signals::{Request, SignalSet};
+use fuzzz::signals::{Request, SignalSet};
 
 const MAX_PROBES: usize = 5000;
 const TRIALS: u32 = 20;

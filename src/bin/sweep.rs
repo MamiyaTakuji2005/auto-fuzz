@@ -10,14 +10,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use auto_fuzz::evolutionary::{
+use fuzzz::evolutionary::{
     ChainTable, EvolutionaryLoop, HttpFeedback, LengthPolicy,
     PlacementPolicy, SeedCorpus, WeightedSampler,
 };
-use auto_fuzz::evolutionary::havoc::HavocMutator;
-use auto_fuzz::evolutionary::atoms::ATOMS;
-use auto_fuzz::signals::{Probe, Request};
-use auto_fuzz::signals::signal::ProbeResponse;
+use fuzzz::evolutionary::havoc::HavocMutator;
+use fuzzz::evolutionary::atoms::ATOMS;
+use fuzzz::signals::{Probe, Request};
+use fuzzz::signals::signal::ProbeResponse;
 
 // ── Probes ────────────────────────────────────────────────────────────────────
 

@@ -1,9 +1,9 @@
-//! `fuzz-gui` — workbench for the auto-fuzz evolutionary engine.
+//! `fuzz-gui` — workbench for the fuzzz evolutionary engine.
 //!
 //! Run: `cargo run --bin fuzz-gui --features gui --release`
 
-use auto_fuzz::agent::{Fuzzer, FuzzMode, FuzzResult};
-use auto_fuzz::http::HttpProbe;
+use fuzzz::agent::{Fuzzer, FuzzMode, FuzzResult};
+use fuzzz::http::HttpProbe;
 use eframe::egui;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -371,9 +371,9 @@ fn build_record(
 ) -> RunRecord {
     let hits_detail: Vec<HitDetail> = outcome.interesting.iter().map(|h| {
         let source = match &h.source {
-            auto_fuzz::agent::PayloadSource::Table { preset, index } => format!("table:{preset}[{index}]"),
-            auto_fuzz::agent::PayloadSource::UserInput { index } => format!("input[{index}]"),
-            auto_fuzz::agent::PayloadSource::Evolutionary => "evolved".into(),
+            fuzzz::agent::PayloadSource::Table { preset, index } => format!("table:{preset}[{index}]"),
+            fuzzz::agent::PayloadSource::UserInput { index } => format!("input[{index}]"),
+            fuzzz::agent::PayloadSource::Evolutionary => "evolved".into(),
         };
         HitDetail {
             payload: h.payload.clone(),
@@ -520,7 +520,7 @@ impl eframe::App for App {
 
         // ── Top bar ─────────────────────────────────────────────────────
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.heading("auto-fuzz workbench");
+            ui.heading("fuzzz workbench");
             ui.label(egui::RichText::new(
                 "Atom-chain generation + havoc mutation · corpus-driven · deterministic replay",
             ).weak());
@@ -853,11 +853,11 @@ fn card(ui: &mut egui::Ui, label: &str, value: &str) {
 
 fn main() -> eframe::Result {
     eframe::run_native(
-        "auto-fuzz workbench",
+        "fuzzz workbench",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1200.0, 750.0])
-                .with_title("auto-fuzz workbench"),
+                .with_title("fuzzz workbench"),
             ..Default::default()
         },
         Box::new(|_cc| Ok(Box::new(App::default()))),

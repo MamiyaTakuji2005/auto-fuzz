@@ -2,16 +2,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use auto_fuzz::evolutionary::{
+use fuzzz::evolutionary::{
     ChainTable, EvolutionaryLoop, HavocMutator, HttpFeedback, LengthPolicy,
     PlacementPolicy, SeedCorpus, WeightedSampler,
 };
-use auto_fuzz::evolutionary::atoms::ATOMS;
-use auto_fuzz::mock_config::{load_targets, ConfigProbe};
-use auto_fuzz::signals::signal::{
+use fuzzz::evolutionary::atoms::ATOMS;
+use fuzzz::mock_config::{load_targets, ConfigProbe};
+use fuzzz::signals::signal::{
     ErrorClassifier, ReflectionClassifier, StatusClassifier, TimeDelayClassifier,
 };
-use auto_fuzz::signals::{Request, SignalSet};
+use fuzzz::signals::{Request, SignalSet};
 
 const PROBES_PER_RUN: usize = 1000;
 const RUNS_PER_TARGET: usize = 200;

@@ -2,7 +2,7 @@
 //!
 //! Run: `cargo run --example report --release`
 
-use auto_fuzz::evolutionary::*;
+use fuzzz::evolutionary::*;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

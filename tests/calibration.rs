@@ -13,10 +13,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use auto_fuzz::evolutionary::*;
-use auto_fuzz::mock_config::{load_targets, ConfigProbe, MockTarget};
-use auto_fuzz::signals::{Request, SignalSet};
-use auto_fuzz::signals::signal::{
+use fuzzz::evolutionary::*;
+use fuzzz::mock_config::{load_targets, ConfigProbe, MockTarget};
+use fuzzz::signals::{Request, SignalSet};
+use fuzzz::signals::signal::{
     BodySignatureClassifier, ErrorClassifier, ReflectionClassifier, StatusClassifier,
     TimeDelayClassifier,
 };

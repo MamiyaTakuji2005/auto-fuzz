@@ -1,11 +1,11 @@
 [package]
-name = "auto-fuzz"
+name = "fuzzz"
 version = "0.1.0"
 edition = "2021"
 authors = ["re:Vise Team"]
 description = "General-purpose evolutionary fuzzer engine — atom-chain generation + havoc mutation, driven by corpus feedback"
 license = "MIT"
-repository = "https://github.com/MamiyaTakuji2005/auto-fuzz"
+repository = "https://github.com/MamiyaTakuji2005/fuzzz"
 
 [dependencies]
 rand = { version = "0.8", features = ["small_rng"] }

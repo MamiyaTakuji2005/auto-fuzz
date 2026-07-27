@@ -16,20 +16,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use auto_fuzz::evolutionary::{
+use fuzzz::evolutionary::{
     ChainTable, EvolutionaryLoop, HavocMutator, LengthPolicy,
     PlacementPolicy, SeedCorpus, WeightedSampler,
     Feedback, FeedbackEval, EvaluationContext, BoostMode,
 };
-use auto_fuzz::evolutionary::atoms::ATOMS;
-use auto_fuzz::evolutionary::havoc::HavocSchedule;
+use fuzzz::evolutionary::atoms::ATOMS;
+use fuzzz::evolutionary::havoc::HavocSchedule;
 
-use auto_fuzz::mock_config::{load_config, ConfigProbe, MockTarget};
-use auto_fuzz::signals::signal::{
+use fuzzz::mock_config::{load_config, ConfigProbe, MockTarget};
+use fuzzz::signals::signal::{
     BodySignatureClassifier, ErrorClassifier, ReflectionClassifier, StatusClassifier,
     TimeDelayClassifier, Signal, ReflectionEncoding,
 };
-use auto_fuzz::signals::{Request, SignalSet};
+use fuzzz::signals::{Request, SignalSet};
 
 const DEFAULT_MAX_PROBES: usize = 300;
 const DEFAULT_TRIALS: u32 = 20;
@@ -760,7 +760,7 @@ async fn main() {
         }
     };
 
-    println!("\nauto-fuzz Calibration Harness");
+    println!("\nfuzzz Calibration Harness");
     println!("=============================");
     println!("Config: {}", config_path.display());
     println!("Targets: {}\n", targets.len());
