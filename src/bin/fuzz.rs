@@ -320,7 +320,7 @@ OUTPUT:
 EXAMPLES:
     fuzz --preset sqli --url 'https://t/post.php' --inject-query id --budget 150
     fuzz --preset ssrf --url 'https://t/fetch' --inject-query url --oob-url x.oast.me
-    fuzz --preset modules/ssrf-cloud-metadata.json --url 'https://t/fetch' \
+    fuzz --preset examples/ssrf-cloud-metadata.json --url 'https://t/fetch' \
          --inject-query url --seed 42
     fuzz --preset proto --url 'https://t/api' --method POST --inject-json --jsonl
 "#;

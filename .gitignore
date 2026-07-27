@@ -17,3 +17,6 @@ Thumbs.db
 # Environment
 .env
 .env.*
+
+# Agent context files
+AGENTS.md

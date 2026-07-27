@@ -64,6 +64,14 @@ path = "src/bin/havoc_ablation.rs"
 name = "sweep"
 path = "src/bin/sweep.rs"
 
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[[bin]]
+name = "report"
+path = "src/bin/report.rs"
+
 [features]
 default = []
 # Real HTTP transport (reqwest) — enables the `http` module + `fuzz` CLI.
