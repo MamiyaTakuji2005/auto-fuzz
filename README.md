@@ -1,4 +1,4 @@
-# auto-fuzz
+# fuzzz
 
 A simple fuzzing engine — feed it a target, a vocabulary, and a budget. It mutates, probes, classifies results, and evolves a corpus of promising payloads toward confirmed hits, all from a tiny initial table. Tries to be transport-agnostic, fully deterministic, and built for both batch sweeps and long runs. 
 [citation needed]
