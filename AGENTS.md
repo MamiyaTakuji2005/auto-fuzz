@@ -1,4 +1,4 @@
-# AGENTS.md — auto-fuzz
+# AGENTS.md — fuzzz
 
 ## What This Project Is
 
@@ -10,7 +10,7 @@ Evolutionary web fuzzer engine in Rust. Atom-chain generation + havoc mutation, 
 cargo check                              # type-check (fast)
 cargo test                               # unit tests + calibration regression guard
 cargo test --test calibration -- --nocapture   # per-target hit rates (deterministic)
-cargo run --example report --release     # benchmarks
+cargo run --bin report --release       # benchmarks
 cargo run --bin calibrate --release -- targets.toml   # full calibration sweep
 cargo run --bin stress --release -- stress_targets.toml
 cargo run --bin fuzz --features http -- --preset sqli --url <URL> --inject-query <p>  # headless real-target runner
@@ -66,7 +66,7 @@ the data half — `grammar` (`atoms`, `chain`, `placement`, `length`), `payloads
 `gen_ratio`, `shells`. Grammar and payloads are separate sections in one file, so
 "my seeds but the hardcoded atoms" is just an omitted `grammar`. The chain mirrors
 the internal `from → {to → weight}` map — you edit the tuned artifact directly.
-See `modules/ssrf-cloud-metadata.json` for a worked example, and `src/module.rs`
+See `examples/ssrf-cloud-metadata.json` for a worked example, and `src/module.rs`
 for the schema. A class name shadows a same-named file (`./name.json` forces the
 file). A non-empty `signals` array makes the module **self-contained** — it names
 its detectors (`["status","error:dbms","body-signature:cloud"]`), resolved through
@@ -84,7 +84,7 @@ silent calibration regressions — a target collapsing to 0, or the ssrf timing
 re-probe halving — without a full sweep. The `calibrate` binary is for
 exploring the parameter space; this test locks in the result.
 
-Binaries (`src/bin/`): `calibrate`, `stress`, `signal_sweep`, `atom_audit`, `cap_sweep`, `havoc_ablation`, `sweep`, `fuzz` (feature `http`), `fuzz-gui` (feature `gui`).
+Binaries (`src/bin/`): `calibrate`, `stress`, `signal_sweep`, `atom_audit`, `cap_sweep`, `havoc_ablation`, `sweep`, `bench`, `report`, `fuzz` (feature `http`), `fuzz-gui` (feature `gui`).
 
 **fuzz-gui** is the interactive workbench — exposes all 9 presets, 4 fuzz modes, 6 injection points, request timeout, an OOB collaborator field, and stop-on-first-hit. Uses the `Fuzzer` builder API directly with progress reporting and cancellation.
 
@@ -183,10 +183,10 @@ src/
 ├── baseline.rs            # null-hypothesis signal filtering
 ├── mock_config.rs         # TOML mock targets
 ├── payloads.rs            # curated payload corpus (payload_data/*.json)
-├── bin/                   # 9 tool binaries
+├── bin/                   # 11 tool binaries (see list above)
 ├── evolutionary/          # core engine (atoms, havoc, corpus, evolution, rng)
 └── signals/               # classification + mutator primitives
-examples/                  # benchmark, digits demo, report suite
+examples/                  # digits demo, module-file example (ssrf-cloud-metadata.json)
 stuff/                     # calibration data, plots, scripts (gitignored)
 targets.toml               # main calibration mock targets
 stress_targets.toml        # extended stress test targets

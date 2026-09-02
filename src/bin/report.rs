@@ -1,6 +1,6 @@
 //! Benchmark & report suite — throughput, discovery, waste, and replay.
 //!
-//! Run: `cargo run --example report --release`
+//! Run: `cargo run --bin report --release`
 
 use fuzzz::evolutionary::*;
 use async_trait::async_trait;

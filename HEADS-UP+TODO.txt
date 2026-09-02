@@ -1,3 +1,0 @@
-Map out the cli surface
-
-make atoms tables also read from an external config file with  -a <file> but also hardcoded ones with -a SSRF for piped "scans" or webfuzzing campains that are more deterministic but still using generation + maybe change the implementation of the current json payloads to be the same witha --payload or -p <file> flag, like this they can also be combined like -a SSRF,XXE (although I doubt this is useful)

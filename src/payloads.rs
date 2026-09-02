@@ -7,8 +7,7 @@
 //! per-payload metadata — `context` (where the payload belongs: html_body, json,
 //! xml, attribute…), `severity`, `targets`, `encoding`, and a `description`. The
 //! metadata is carried through to results (e.g. JSONL output) and is the basis
-//! for future context-aware injection-point selection. NoSQLi has no curated
-//! source and keeps its hand-written table.
+//! for future context-aware injection-point selection.
 
 use serde::Deserialize;
 

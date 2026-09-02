@@ -1,6 +1,6 @@
 //! Speed benchmark — quiet vs noisy vs heavy targets.
 //!
-//! Run: `cargo run --example benchmark --release`
+//! Run: `cargo run --bin bench --release`
 
 use fuzzz::evolutionary::*;
 use async_trait::async_trait;

